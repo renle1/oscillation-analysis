@@ -49,10 +49,10 @@ def _level_name(level_num: int) -> str:
     return "advisory"
 
 
-def _find_covering_sustained_interval(
+def _find_covering_sustained_alert(
     *,
     burst_ev: dict[str, object],
-    sustained_events: Sequence[dict[str, object]],
+    sustained_alerts: Sequence[dict[str, object]],
     window_sec: float,
     freq_tol_hz: float,
 ) -> tuple[str, int]:
@@ -61,7 +61,7 @@ def _find_covering_sustained_interval(
     s0 = _as_float(burst_ev.get("start_t", np.nan))
     e0 = _as_float(burst_ev.get("end_t", np.nan))
     f0 = _as_float(burst_ev.get("dominant_freq_hz", np.nan))
-    for sustained_ev in sustained_events:
+    for sustained_ev in sustained_alerts:
         s1 = _as_float(sustained_ev.get("start_t", np.nan))
         e1 = _as_float(sustained_ev.get("end_t", np.nan))
         if not _intervals_near(
@@ -73,11 +73,23 @@ def _find_covering_sustained_interval(
         ):
             continue
         f1 = _as_float(sustained_ev.get("dominant_freq_hz", np.nan))
-        if (not np.isfinite(f0)) or (not np.isfinite(f1)):
+        sustained_interval_id = int(sustained_ev.get("interval_id", -1))
+        sustained_level_num = int(sustained_ev.get("alert_level_num", 0))
+        sustained_modal_reliable = int(sustained_ev.get("modal_reliable", 0))
+
+        if np.isfinite(f0) and np.isfinite(f1):
+            if _freq_match(float(f0), float(f1), float(freq_tol_hz)):
+                return "covered_by_sustained_same_freq", int(sustained_interval_id)
+            # When sustained frequency is not modal-reliable, allow investigate-level
+            # fallback coverage even on numeric mismatch.
+            if (sustained_level_num >= 2) and (sustained_modal_reliable <= 0):
+                return "covered_by_sustained_investigate_unreliable_freq", int(sustained_interval_id)
             continue
-        if not _freq_match(float(f0), float(f1), float(freq_tol_hz)):
-            continue
-        return "covered_by_sustained_same_freq", int(sustained_ev.get("interval_id", -1))
+
+        # Frequency can be missing on sustained operator alerts in some pipelines.
+        # In that case, allow suppression only when sustained severity is investigate+.
+        if sustained_level_num >= 2:
+            return "covered_by_sustained_investigate_fallback", int(sustained_interval_id)
     return "", -1
 
 
@@ -93,13 +105,18 @@ def evaluate_burst_alerts(
     if not bool(policy.burst_policy_enabled):
         return []
     interval_events = [dict(ev) for ev in events if str(ev.get("event", "")) == "burst_interval_final"]
-    sustained_interval_events = [dict(ev) for ev in events if str(ev.get("event", "")) == "interval_final"]
-    sustained_by_key: dict[tuple[str, str], list[dict[str, object]]] = {}
-    for ev in sustained_interval_events:
+    sustained_alert_events = [
+        dict(ev)
+        for ev in events
+        if (str(ev.get("event", "")) == "operator_alert")
+        and (str(ev.get("analysis_type", "")).strip().lower() == "operator_policy")
+    ]
+    sustained_alert_by_key: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for ev in sustained_alert_events:
         key = (str(ev.get("device", "")), str(ev.get("channel", "")))
-        sustained_by_key.setdefault(key, []).append(ev)
-    for key in sustained_by_key:
-        sustained_by_key[key].sort(
+        sustained_alert_by_key.setdefault(key, []).append(ev)
+    for key in sustained_alert_by_key:
+        sustained_alert_by_key[key].sort(
             key=lambda ev: (
                 float(_as_float(ev.get("start_t", np.nan))),
                 int(ev.get("interval_id", -1)),
@@ -122,10 +139,10 @@ def evaluate_burst_alerts(
             interval_id = int(interval_ev.get("burst_interval_id", -1))
             dev = str(interval_ev.get("device", ""))
             ch = str(interval_ev.get("channel", ""))
-            sustained_list = sustained_by_key.get((dev, ch), [])
-            suppress_reason, sustained_interval_id = _find_covering_sustained_interval(
+            sustained_list = sustained_alert_by_key.get((dev, ch), [])
+            suppress_reason, sustained_interval_id = _find_covering_sustained_alert(
                 burst_ev=interval_ev,
-                sustained_events=sustained_list,
+                sustained_alerts=sustained_list,
                 window_sec=float(policy.burst_suppress_window_sec),
                 freq_tol_hz=float(policy.burst_suppress_freq_match_tol_hz),
             )
