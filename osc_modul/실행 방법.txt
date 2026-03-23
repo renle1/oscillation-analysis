@@ -1,0 +1,16 @@
+﻿Run from project root:
+
+& C:\Users\pspo\AppData\Local\Programs\Python\Python312\python.exe -m osc_modul.osc_runtime_modul --help
+
+Replay CSV (test):
+
+& C:\Users\pspo\AppData\Local\Programs\Python\Python312\python.exe -m osc_modul.osc_runtime_modul --input-mode replay_csv --csv "C:\path\to\file.csv"
+
+Live CSV tail (production-like):
+
+& C:\Users\pspo\AppData\Local\Programs\Python\Python312\python.exe -m osc_modul.osc_runtime_modul --input-mode live_csv_tail --csv "C:\path\to\file.csv" --update-sec 2 --live-max-updates 0
+
+Built-in signal test (no CSV):
+
+& C:\Users\pspo\AppData\Local\Programs\Python\Python312\python.exe -m osc_modul.osc_runtime_modul --input-mode test_signal --test-duration-sec 120 --update-sec 2
+
