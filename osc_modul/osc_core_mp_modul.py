@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import queue
 import threading
 import time
@@ -11,10 +10,13 @@ from typing import Callable, Sequence
 
 import numpy as np
 
-from .osc_config_modul import _resolve_mp_runtime_controls
 from .osc_core_postprep_modul import apply_modal_postprep, default_postprep_summary
-from .osc_core_signal_modul import _estimate_dt_from_timestamps, _trim_ring_by_time
-from .osc_state_modul import MP_RUNTIME_MODE_LIVE, ChannelStreamState
+from .osc_core_signal_modul import (
+    _estimate_dt_from_timestamps,
+    _local_rms_decay_from_signal,
+    _trim_ring_by_time,
+)
+from .osc_state_modul import MP_RUNTIME_MODE_LIVE, MP_RUNTIME_MODE_REPLAY, ChannelStreamState
 
 
 def _damping_ratio_from(freq_hz: float, damping_per_sec: float) -> float:
@@ -82,6 +84,64 @@ def _select_mp_analysis_window(
     if (end_t - fb_tail_start) >= float(mp_onset_min_window_sec):
         return "tail_fallback", float(fb_tail_start), float(end_t)
 
+    return "none", float("nan"), float("nan")
+
+
+def _adaptive_profile_from_freq(
+    freq_hz: float,
+    *,
+    low_band_max_hz: float,
+    high_band_min_hz: float,
+) -> str:
+    """Map dominant frequency to adaptive profile: high / mid / low."""
+
+    f = float(freq_hz)
+    if np.isfinite(f):
+        if f >= float(high_band_min_hz):
+            return "high"
+        if f < float(low_band_max_hz):
+            return "low"
+    return "mid"
+
+
+def _window_sec_for_profile(
+    profile: str,
+    *,
+    high_sec: float,
+    mid_sec: float,
+    low_sec: float,
+) -> float:
+    """Return profile-specific window seconds with finite fallback."""
+
+    p = str(profile).strip().lower()
+    if p == "high":
+        out = float(high_sec)
+    elif p == "low":
+        out = float(low_sec)
+    else:
+        out = float(mid_sec)
+    if (not np.isfinite(out)) or (out <= 0.0):
+        out = float(mid_sec)
+    if (not np.isfinite(out)) or (out <= 0.0):
+        out = 12.0
+    return float(out)
+
+
+def _select_tail_analysis_window(
+    *,
+    start_t: float,
+    end_t: float,
+    duration_sec: float,
+    tail_window_sec: float,
+    min_window_sec: float,
+) -> tuple[str, float, float]:
+    """Select trailing window from event tail for damping analysis."""
+
+    tail_sec = float(min(float(duration_sec), max(0.0, float(tail_window_sec))))
+    w0 = float(max(float(start_t), float(end_t) - tail_sec))
+    w1 = float(end_t)
+    if np.isfinite(w0) and np.isfinite(w1) and ((w1 - w0) >= float(min_window_sec)):
+        return "tail", float(w0), float(w1)
     return "none", float("nan"), float("nan")
 
 
@@ -888,9 +948,25 @@ class _IntervalMPPostRuntime:
         modal_preprocess_max_repair_fraction: float,
         modal_preprocess_repair_mode: str,
         modal_preprocess_keep_raw_summary: bool,
+        mp_update_cadence_sec: float,
+        mp_adaptive_low_band_max_hz: float,
+        mp_adaptive_high_band_min_hz: float,
+        mp_freq_window_high_sec: float,
+        mp_freq_window_mid_sec: float,
+        mp_freq_window_low_sec: float,
+        mp_decay_window_high_sec: float,
+        mp_decay_window_mid_sec: float,
+        mp_decay_window_low_sec: float,
+        mp_decay_rms_win_sec: float,
+        mp_decay_step_sec: float,
+        mp_decay_min_windows: int,
+        mp_decay_min_r2: float,
+        mp_decay_freq_jump_rel_max: float,
         mp_async_enabled: bool,
         mp_queue_maxsize: int,
         mp_finalize_wait_sec: float,
+        mp_runtime_mode: str = MP_RUNTIME_MODE_LIVE,
+        mp_preview_async_enabled: bool | None = None,
     ) -> None:
         self.enabled = bool(mp_enabled)
         self.mp_min_interval_sec = float(mp_min_interval_sec)
@@ -921,10 +997,35 @@ class _IntervalMPPostRuntime:
         self.modal_preprocess_max_repair_fraction = float(max(0.0, modal_preprocess_max_repair_fraction))
         self.modal_preprocess_repair_mode = str(modal_preprocess_repair_mode).strip().lower()
         self.modal_preprocess_keep_raw_summary = bool(modal_preprocess_keep_raw_summary)
+        self.mp_update_cadence_sec = float(max(0.0, mp_update_cadence_sec))
+        self.mp_adaptive_low_band_max_hz = float(max(1e-9, mp_adaptive_low_band_max_hz))
+        self.mp_adaptive_high_band_min_hz = float(max(self.mp_adaptive_low_band_max_hz, mp_adaptive_high_band_min_hz))
+        self.mp_freq_window_high_sec = float(max(1.0, mp_freq_window_high_sec))
+        self.mp_freq_window_mid_sec = float(max(1.0, mp_freq_window_mid_sec))
+        self.mp_freq_window_low_sec = float(max(1.0, mp_freq_window_low_sec))
+        self.mp_decay_window_high_sec = float(max(1.0, mp_decay_window_high_sec))
+        self.mp_decay_window_mid_sec = float(max(1.0, mp_decay_window_mid_sec))
+        self.mp_decay_window_low_sec = float(max(1.0, mp_decay_window_low_sec))
+        self.mp_decay_rms_win_sec = float(max(1e-3, mp_decay_rms_win_sec))
+        self.mp_decay_step_sec = float(max(1e-3, mp_decay_step_sec))
+        self.mp_decay_min_windows = int(max(2, mp_decay_min_windows))
+        self.mp_decay_min_r2 = float(max(0.0, min(1.0, mp_decay_min_r2)))
+        self.mp_decay_freq_jump_rel_max = float(max(0.0, mp_decay_freq_jump_rel_max))
         self.mp_async_enabled = bool(mp_async_enabled)
         self.mp_finalize_wait_sec = float(max(0.0, mp_finalize_wait_sec))
+        mode = str(mp_runtime_mode).strip().lower()
+        if mode not in (MP_RUNTIME_MODE_LIVE, MP_RUNTIME_MODE_REPLAY):
+            mode = MP_RUNTIME_MODE_LIVE
+        self.mp_runtime_mode = str(mode)
+        self.mp_preview_async_enabled = (
+            bool(mp_preview_async_enabled)
+            if (mp_preview_async_enabled is not None)
+            else bool(self.mp_runtime_mode == MP_RUNTIME_MODE_LIVE)
+        )
 
+        self._active_capture_lock = threading.Lock()
         self._active_capture_by_key: dict[tuple[str, str], dict[str, object]] = {}
+        self._next_interval_seq_by_key: dict[tuple[str, str], int] = {}
         self._interval_capture_by_interval_id: dict[int, list[tuple[float, float]]] = {}
         self._records_by_interval_id: dict[int, dict[str, object]] = {}
         self._latest_seq_by_interval_id: dict[int, int] = {}
@@ -956,6 +1057,46 @@ class _IntervalMPPostRuntime:
             self._worker = threading.Thread(target=self._worker_loop, daemon=True)
             self._worker.start()
 
+        self._preview_lock = threading.Lock()
+        self._preview_latest_job_by_scope: dict[tuple[str, str, int], dict[str, object]] = {}
+        self._preview_enqueued_scopes: set[tuple[str, str, int]] = set()
+        self._preview_queue: queue.Queue[tuple[str, str, int]] | None = None
+        self._preview_stop_event: threading.Event | None = None
+        self._preview_worker: threading.Thread | None = None
+        if self.enabled and self.mp_preview_async_enabled and (self.mp_update_cadence_sec > 0.0):
+            self._preview_queue = queue.Queue()
+            self._preview_stop_event = threading.Event()
+            self._preview_worker = threading.Thread(target=self._preview_worker_loop, daemon=True)
+            self._preview_worker.start()
+
+    def _new_capture_state(self, key: tuple[str, str], start_t: float) -> dict[str, object]:
+        seq = int(self._next_interval_seq_by_key.get(key, 0)) + 1
+        self._next_interval_seq_by_key[key] = int(seq)
+        return {
+            "start_t": float(start_t),
+            "samples": [],
+            "live_freq_hint_hz": float("nan"),
+            "last_preview_submit_t": float("nan"),
+            "last_preview_submit_sample_count": 0,
+            "preview_seq": 0,
+            "last_preview_apply_seq": 0,
+            "interval_seq": int(seq),
+            "lock": threading.Lock(),
+        }
+
+    def _reset_capture_state_locked(self, cap: dict[str, object], *, key: tuple[str, str], start_t: float) -> int:
+        seq = int(self._next_interval_seq_by_key.get(key, int(cap.get("interval_seq", 0)))) + 1
+        self._next_interval_seq_by_key[key] = int(seq)
+        cap["start_t"] = float(start_t)
+        cap["samples"] = []
+        cap["live_freq_hint_hz"] = float("nan")
+        cap["last_preview_submit_t"] = float("nan")
+        cap["last_preview_submit_sample_count"] = 0
+        cap["preview_seq"] = 0
+        cap["last_preview_apply_seq"] = 0
+        cap["interval_seq"] = int(seq)
+        return int(seq)
+
     def sync_interval_capture(
         self,
         *,
@@ -964,20 +1105,50 @@ class _IntervalMPPostRuntime:
         is_interval_active: bool,
         tick_samples: Sequence[tuple[float, float]],
     ) -> None:
-        """Capture only interval-local raw samples (avoid unbounded channel history)."""
+        """Capture interval samples and submit preview snapshots only (no in-thread MP compute)."""
 
         if not self.enabled:
             return
-        if bool(is_interval_active) and np.isfinite(active_start_t):
+        if (not bool(is_interval_active)) or (not np.isfinite(active_start_t)):
+            with self._active_capture_lock:
+                cap = self._active_capture_by_key.pop(key, None)
+            if isinstance(cap, dict):
+                lock = cap.get("lock")
+                if (lock is None) or (not hasattr(lock, "acquire")):
+                    lock = threading.Lock()
+                    cap["lock"] = lock
+                with lock:
+                    interval_seq = int(cap.get("interval_seq", -1))
+                if int(interval_seq) >= 0:
+                    self._invalidate_preview_scope(key=key, interval_seq=int(interval_seq))
+            return
+
+        with self._active_capture_lock:
             cap = self._active_capture_by_key.get(key)
             if cap is None:
-                cap = {"start_t": float(active_start_t), "samples": []}
+                cap = self._new_capture_state(key=key, start_t=float(active_start_t))
                 self._active_capture_by_key[key] = cap
-            else:
-                prev_start = float(cap.get("start_t", np.nan))
-                if (not np.isfinite(prev_start)) or (float(active_start_t) < prev_start):
-                    cap["start_t"] = float(active_start_t)
-            start_t = float(cap.get("start_t", active_start_t))
+
+        lock = cap.get("lock")
+        if (lock is None) or (not hasattr(lock, "acquire")):
+            lock = threading.Lock()
+            cap["lock"] = lock
+
+        invalidate_interval_seq = -1
+        preview_job: dict[str, object] | None = None
+        with lock:
+            start_t = float(cap.get("start_t", np.nan))
+            if not np.isfinite(start_t):
+                start_t = float(active_start_t)
+                cap["start_t"] = float(start_t)
+            elif float(active_start_t) > (float(start_t) + 1e-6):
+                invalidate_interval_seq = int(cap.get("interval_seq", -1))
+                self._reset_capture_state_locked(cap, key=key, start_t=float(active_start_t))
+                start_t = float(active_start_t)
+            elif float(active_start_t) < (float(start_t) - 1e-6):
+                cap["start_t"] = float(active_start_t)
+                start_t = float(active_start_t)
+
             samples = cap.get("samples")
             if not isinstance(samples, list):
                 samples = []
@@ -985,11 +1156,194 @@ class _IntervalMPPostRuntime:
             for t, v in tick_samples:
                 t_f = float(t)
                 v_f = float(v)
-                if np.isfinite(t_f) and np.isfinite(v_f) and (t_f >= start_t):
+                if np.isfinite(t_f) and np.isfinite(v_f) and (t_f >= float(start_t)):
                     samples.append((t_f, v_f))
-            return
+            preview_job = self._build_preview_job_locked(key=key, cap=cap)
 
-        self._active_capture_by_key.pop(key, None)
+        if int(invalidate_interval_seq) >= 0:
+            self._invalidate_preview_scope(key=key, interval_seq=int(invalidate_interval_seq))
+        if isinstance(preview_job, dict):
+            self._submit_preview_snapshot(preview_job)
+
+    def _build_preview_job_locked(self, *, key: tuple[str, str], cap: dict[str, object]) -> dict[str, object] | None:
+        if (not bool(self.mp_preview_async_enabled)) or (float(self.mp_update_cadence_sec) <= 0.0):
+            return None
+        samples = cap.get("samples")
+        if not isinstance(samples, list):
+            return None
+        n_samples = int(len(samples))
+        if n_samples < int(self.mp_min_samples):
+            return None
+        start_t = float(cap.get("start_t", np.nan))
+        t_last = float(samples[-1][0]) if samples else float("nan")
+        if (not np.isfinite(start_t)) or (not np.isfinite(t_last)) or (float(t_last) <= float(start_t)):
+            return None
+        readiness_min_sec = float(max(0.0, float(self.mp_onset_skip_sec)) + max(0.0, float(self.mp_onset_min_window_sec)))
+        if float(t_last - start_t) < float(readiness_min_sec):
+            return None
+        last_submit_t = float(cap.get("last_preview_submit_t", np.nan))
+        if np.isfinite(last_submit_t) and ((float(t_last) - float(last_submit_t)) < float(self.mp_update_cadence_sec)):
+            return None
+        last_submit_n = int(cap.get("last_preview_submit_sample_count", 0))
+        min_new_samples = int(max(8, int(self.mp_min_samples) // 4))
+        if int(last_submit_n) > 0 and ((n_samples - int(last_submit_n)) < int(min_new_samples)):
+            return None
+
+        preview_seq = int(cap.get("preview_seq", 0)) + 1
+        cap["preview_seq"] = int(preview_seq)
+        cap["last_preview_submit_t"] = float(t_last)
+        cap["last_preview_submit_sample_count"] = int(n_samples)
+        sample_snapshot = tuple((float(t), float(v)) for t, v in samples)
+        return {
+            "key": (str(key[0]), str(key[1])),
+            "interval_seq": int(cap.get("interval_seq", -1)),
+            "preview_seq": int(preview_seq),
+            "start_t": float(start_t),
+            "t_end": float(t_last),
+            "prev_hint_hz": float(cap.get("live_freq_hint_hz", np.nan)),
+            "samples": sample_snapshot,
+        }
+
+    def _submit_preview_snapshot(self, job: dict[str, object]) -> None:
+        if self._preview_queue is None:
+            return
+        key = job.get("key")
+        if (not isinstance(key, tuple)) or (len(key) != 2):
+            return
+        scope = (str(key[0]), str(key[1]), int(job.get("interval_seq", -1)))
+        with self._preview_lock:
+            self._preview_latest_job_by_scope[scope] = dict(job)
+            if scope in self._preview_enqueued_scopes:
+                return
+            self._preview_enqueued_scopes.add(scope)
+            self._preview_queue.put_nowait(scope)
+
+    def _invalidate_preview_scope(self, *, key: tuple[str, str], interval_seq: int) -> None:
+        scope = (str(key[0]), str(key[1]), int(interval_seq))
+        with self._preview_lock:
+            self._preview_latest_job_by_scope.pop(scope, None)
+            self._preview_enqueued_scopes.discard(scope)
+
+    def _preview_worker_loop(self) -> None:
+        assert self._preview_queue is not None
+        while True:
+            if (self._preview_stop_event is not None) and self._preview_stop_event.is_set():
+                break
+            try:
+                scope = self._preview_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            try:
+                with self._preview_lock:
+                    self._preview_enqueued_scopes.discard(scope)
+                    job = self._preview_latest_job_by_scope.pop(scope, None)
+                if not isinstance(job, dict):
+                    continue
+                try:
+                    hint_hz = self._estimate_live_frequency_hint(
+                        start_t=float(job.get("start_t", np.nan)),
+                        t_end=float(job.get("t_end", np.nan)),
+                        samples=job.get("samples", ()),
+                        prev_hint_hz=float(job.get("prev_hint_hz", np.nan)),
+                    )
+                except Exception:
+                    hint_hz = float("nan")
+                self._apply_preview_hint(job=job, hint_hz=float(hint_hz))
+            finally:
+                self._preview_queue.task_done()
+
+    def _apply_preview_hint(self, *, job: dict[str, object], hint_hz: float) -> None:
+        if (not np.isfinite(hint_hz)) or (float(hint_hz) <= 0.0):
+            return
+        key = job.get("key")
+        if (not isinstance(key, tuple)) or (len(key) != 2):
+            return
+        interval_seq = int(job.get("interval_seq", -1))
+        preview_seq = int(job.get("preview_seq", -1))
+        if int(interval_seq) < 0 or int(preview_seq) < 0:
+            return
+        with self._active_capture_lock:
+            cap = self._active_capture_by_key.get((str(key[0]), str(key[1])))
+        if not isinstance(cap, dict):
+            return
+        lock = cap.get("lock")
+        if (lock is None) or (not hasattr(lock, "acquire")):
+            return
+        with lock:
+            if int(cap.get("interval_seq", -1)) != int(interval_seq):
+                return
+            if int(cap.get("preview_seq", -1)) != int(preview_seq):
+                return
+            if int(preview_seq) <= int(cap.get("last_preview_apply_seq", -1)):
+                return
+            cap["live_freq_hint_hz"] = float(hint_hz)
+            cap["last_preview_apply_seq"] = int(preview_seq)
+
+    def _estimate_live_frequency_hint(
+        self,
+        *,
+        start_t: float,
+        t_end: float,
+        samples: Sequence[tuple[float, float]],
+        prev_hint_hz: float,
+    ) -> float:
+        """Estimate dominant frequency on active interval snapshot for adaptive windowing."""
+
+        if (not np.isfinite(start_t)) or (not np.isfinite(t_end)) or (float(t_end) <= float(start_t)):
+            return float("nan")
+        if not samples:
+            return float("nan")
+        arr = np.asarray(samples, dtype=float)
+        if arr.ndim != 2 or arr.shape[1] != 2:
+            return float("nan")
+        t_src = arr[:, 0]
+        v_src = arr[:, 1]
+        duration_sec = float(t_end - start_t)
+        prof = _adaptive_profile_from_freq(
+            float(prev_hint_hz),
+            low_band_max_hz=float(self.mp_adaptive_low_band_max_hz),
+            high_band_min_hz=float(self.mp_adaptive_high_band_min_hz),
+        )
+        w_sec = _window_sec_for_profile(
+            str(prof),
+            high_sec=float(self.mp_freq_window_high_sec),
+            mid_sec=float(self.mp_freq_window_mid_sec),
+            low_sec=float(self.mp_freq_window_low_sec),
+        )
+        _src, w0, w1 = _select_mp_analysis_window(
+            start_t=float(start_t),
+            end_t=float(t_end),
+            duration_sec=float(duration_sec),
+            rms_event_win_sec=float("nan"),
+            mp_onset_skip_sec=float(self.mp_onset_skip_sec),
+            mp_onset_window_sec=float(w_sec),
+            mp_onset_min_window_sec=float(self.mp_onset_min_window_sec),
+            mp_fallback_use_rms_event_window=False,
+            mp_fallback_default_window_sec=float(w_sec),
+        )
+        if (not np.isfinite(w0)) or (not np.isfinite(w1)) or (float(w1) <= float(w0)):
+            return float("nan")
+        m = np.isfinite(t_src) & np.isfinite(v_src) & (t_src >= float(w0)) & (t_src <= float(w1))
+        if int(np.count_nonzero(m)) < int(self.mp_min_samples):
+            return float("nan")
+        fit = _run_matrix_pencil_on_window(
+            t_src[m],
+            v_src[m],
+            mp_model_order=int(self.mp_model_order),
+            mp_max_modes=int(self.mp_max_modes),
+            mp_freq_low_hz=float(self.mp_freq_low_hz),
+            mp_freq_high_hz=float(self.mp_freq_high_hz),
+            mp_min_samples=int(self.mp_min_samples),
+            mp_dt_cv_max=float(self.mp_dt_cv_max),
+            mp_signal_std_min=float(self.mp_signal_std_min),
+            mp_singular_ratio_min=float(self.mp_singular_ratio_min),
+            mp_order_selection_enabled=bool(self.mp_order_selection_enabled),
+            mp_order_candidates=self.mp_order_candidates,
+        )
+        if str(fit.get("mp_status", "")) != "ok":
+            return float("nan")
+        f0 = float(fit.get("mp_dominant_freq_hz", np.nan))
+        return float(f0) if np.isfinite(f0) and (f0 > 0.0) else float("nan")
 
     @staticmethod
     def _sorted_sample_pairs(samples: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -1027,10 +1381,29 @@ class _IntervalMPPostRuntime:
         interval_copy = dict(interval_ev)
         interval_id = int(interval_copy.get("interval_id", -1))
         key = (str(interval_copy.get("device", "")), str(interval_copy.get("channel", "")))
-        seg_capture = self._active_capture_by_key.pop(key, None)
-        seg_samples = seg_capture.get("samples", []) if isinstance(seg_capture, dict) else []
-        if not isinstance(seg_samples, list):
-            seg_samples = []
+
+        with self._active_capture_lock:
+            seg_capture = self._active_capture_by_key.pop(key, None)
+
+        live_hint = float("nan")
+        interval_seq = -1
+        seg_samples: list[tuple[float, float]] = []
+        if isinstance(seg_capture, dict):
+            lock = seg_capture.get("lock")
+            if (lock is None) or (not hasattr(lock, "acquire")):
+                lock = threading.Lock()
+                seg_capture["lock"] = lock
+            with lock:
+                live_hint = float(seg_capture.get("live_freq_hint_hz", np.nan))
+                interval_seq = int(seg_capture.get("interval_seq", -1))
+                samples_obj = seg_capture.get("samples", [])
+                if isinstance(samples_obj, list):
+                    seg_samples = [(float(t), float(v)) for t, v in samples_obj]
+        if np.isfinite(live_hint) and (live_hint > 0.0):
+            interval_copy["mp_live_freq_hint_hz"] = float(live_hint)
+        if int(interval_seq) >= 0:
+            self._invalidate_preview_scope(key=key, interval_seq=int(interval_seq))
+
         merged_samples = list(self._interval_capture_by_interval_id.get(interval_id, []))
         if seg_samples:
             merged_samples.extend((float(t), float(v)) for t, v in seg_samples)
@@ -1054,22 +1427,24 @@ class _IntervalMPPostRuntime:
                 self._queue.put_nowait(job)
                 return
             except queue.Full:
-                rec = self._build_skip_record(
-                    interval_ev=interval_copy,
-                    reason="queue_full",
-                    rms_event_win_sec=float(rms_event_win_sec),
-                    window_source="none",
-                    window_start_t=float("nan"),
-                    window_end_t=float("nan"),
-                )
-                self._store_record(int(seq), int(interval_id), rec)
+                self._queue.put(job)
                 return
 
-        rec = self._analyze_interval(
-            interval_ev=interval_copy,
-            rms_event_win_sec=float(rms_event_win_sec),
-            samples=merged_samples_ro,
-        )
+        try:
+            rec = self._analyze_interval(
+                interval_ev=interval_copy,
+                rms_event_win_sec=float(rms_event_win_sec),
+                samples=merged_samples_ro,
+            )
+        except Exception as exc:
+            rec = self._build_skip_record(
+                interval_ev=interval_copy,
+                reason=f"analysis_exception:{type(exc).__name__}",
+                rms_event_win_sec=float(rms_event_win_sec),
+                window_source="none",
+                window_start_t=float("nan"),
+                window_end_t=float("nan"),
+            )
         self._store_record(int(seq), int(interval_id), rec)
 
     def finalize(self) -> list[dict[str, object]]:
@@ -1077,6 +1452,21 @@ class _IntervalMPPostRuntime:
 
         if not self.enabled:
             return []
+
+        if self._preview_stop_event is not None:
+            self._preview_stop_event.set()
+        if self._preview_worker is not None and self._preview_worker.is_alive():
+            self._preview_worker.join(timeout=0.1)
+        if self._preview_queue is not None:
+            while True:
+                try:
+                    _scope = self._preview_queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._preview_queue.task_done()
+        with self._preview_lock:
+            self._preview_latest_job_by_scope.clear()
+            self._preview_enqueued_scopes.clear()
 
         if self._stop_event is not None:
             if self._queue is not None:
@@ -1128,12 +1518,14 @@ class _IntervalMPPostRuntime:
         with self._record_lock:
             out = list(self._records_by_interval_id.values())
         out.sort(key=lambda e: (int(e.get("interval_id", -1)), float(e.get("end_t", np.nan))))
-        self._active_capture_by_key.clear()
+        with self._active_capture_lock:
+            self._active_capture_by_key.clear()
+            self._next_interval_seq_by_key.clear()
         self._interval_capture_by_interval_id.clear()
         return out
 
     def _worker_loop(self) -> None:
-        """Consume analysis jobs in background."""
+        """Consume finalized interval jobs in background."""
 
         assert self._queue is not None
         while True:
@@ -1144,11 +1536,21 @@ class _IntervalMPPostRuntime:
             except queue.Empty:
                 continue
             interval_id = int(interval_ev.get("interval_id", -1))
-            rec = self._analyze_interval(
-                interval_ev=interval_ev,
-                rms_event_win_sec=float(rms_event_win_sec),
-                samples=samples,
-            )
+            try:
+                rec = self._analyze_interval(
+                    interval_ev=interval_ev,
+                    rms_event_win_sec=float(rms_event_win_sec),
+                    samples=samples,
+                )
+            except Exception as exc:
+                rec = self._build_skip_record(
+                    interval_ev=interval_ev,
+                    reason=f"worker_exception:{type(exc).__name__}",
+                    rms_event_win_sec=float(rms_event_win_sec),
+                    window_source="none",
+                    window_start_t=float("nan"),
+                    window_end_t=float("nan"),
+                )
             self._store_record(int(seq), int(interval_id), rec)
             self._queue.task_done()
 
@@ -1195,6 +1597,29 @@ class _IntervalMPPostRuntime:
                     else float("nan")
                 ),
                 "mp_rms_event_win_sec": float(rms_event_win_sec),
+                "mp_update_cadence_sec": float(self.mp_update_cadence_sec),
+                "mp_live_freq_hint_hz": float(interval_ev.get("mp_live_freq_hint_hz", np.nan)),
+                "mp_freq_profile": "mid",
+                "mp_freq_window_sec_target": float(self.mp_freq_window_mid_sec),
+                "mp_decay_profile": "mid",
+                "mp_decay_window_sec_target": float(self.mp_decay_window_mid_sec),
+                "mp_decay_window_source": "none",
+                "mp_decay_window_start_t": float("nan"),
+                "mp_decay_window_end_t": float("nan"),
+                "mp_decay_window_duration_sec": float("nan"),
+                "mp_decay_qualified": 0,
+                "mp_decay_qualified_reason": "not_executed",
+                "mp_decay_fit_status": "not_executed",
+                "mp_decay_fit_reason": "not_executed",
+                "mp_decay_fit_freq_hz": float("nan"),
+                "mp_decay_freq_jump_rel": float("nan"),
+                "mp_decay_rms_slope_1_per_sec": float("nan"),
+                "mp_decay_rms_r2": float("nan"),
+                "mp_decay_rms_n_windows": 0,
+                "mp_effective_decay_rate_1_per_sec": float("nan"),
+                "mp_half_life_sec": float("nan"),
+                "mp_freq_window_damping_per_sec": float("nan"),
+                "mp_freq_window_damping_ratio": float("nan"),
                 "mp_n_samples": 0,
                 "mp_fit_r2": float("nan"),
                 "mp_mode_count": 0,
@@ -1226,6 +1651,55 @@ class _IntervalMPPostRuntime:
         )
         return rec
 
+    def _fit_window_full(
+        self,
+        *,
+        t_src: np.ndarray,
+        v_src: np.ndarray,
+        w0: float,
+        w1: float,
+    ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+        """Run postprep + optional downsample + MP on one bounded time window."""
+
+        m = np.isfinite(t_src) & np.isfinite(v_src) & (t_src >= float(w0)) & (t_src <= float(w1))
+        t_win = t_src[m]
+        v_win = v_src[m]
+        v_win_clean, _edit_mask, postprep_summary = apply_modal_postprep(
+            v_win,
+            enabled=bool(self.modal_preprocess_enabled),
+            method=str(self.modal_preprocess_method),
+            hampel_half_window=int(self.modal_preprocess_hampel_half_window),
+            hampel_nsigma=float(self.modal_preprocess_hampel_nsigma),
+            max_repair_points=int(self.modal_preprocess_max_repair_points),
+            max_repair_fraction=float(self.modal_preprocess_max_repair_fraction),
+            repair_mode=str(self.modal_preprocess_repair_mode),
+            keep_raw_summary=bool(self.modal_preprocess_keep_raw_summary),
+        )
+        t_mp, v_mp, downsample_summary = _downsample_mp_window_if_needed(
+            t_win,
+            v_win_clean,
+            enabled=bool(self.mp_downsample_enabled),
+            target_fs_hz=float(self.mp_target_fs_hz),
+            lpf_cutoff_hz=float(self.mp_downsample_lpf_cutoff_hz),
+            lpf_order=int(self.mp_downsample_lpf_order),
+            min_samples=int(self.mp_min_samples),
+        )
+        fit = _run_matrix_pencil_on_window(
+            t_mp,
+            v_mp,
+            mp_model_order=int(self.mp_model_order),
+            mp_max_modes=int(self.mp_max_modes),
+            mp_freq_low_hz=float(self.mp_freq_low_hz),
+            mp_freq_high_hz=float(self.mp_freq_high_hz),
+            mp_min_samples=int(self.mp_min_samples),
+            mp_dt_cv_max=float(self.mp_dt_cv_max),
+            mp_signal_std_min=float(self.mp_signal_std_min),
+            mp_singular_ratio_min=float(self.mp_singular_ratio_min),
+            mp_order_selection_enabled=bool(self.mp_order_selection_enabled),
+            mp_order_candidates=self.mp_order_candidates,
+        )
+        return fit, postprep_summary, downsample_summary
+
     def _analyze_interval(
         self,
         *,
@@ -1251,6 +1725,29 @@ class _IntervalMPPostRuntime:
                 "mp_window_end_t": float("nan"),
                 "mp_window_duration_sec": float("nan"),
                 "mp_rms_event_win_sec": float(rms_event_win_sec),
+                "mp_update_cadence_sec": float(self.mp_update_cadence_sec),
+                "mp_live_freq_hint_hz": float(interval_ev.get("mp_live_freq_hint_hz", np.nan)),
+                "mp_freq_profile": "mid",
+                "mp_freq_window_sec_target": float(self.mp_freq_window_mid_sec),
+                "mp_decay_profile": "mid",
+                "mp_decay_window_sec_target": float(self.mp_decay_window_mid_sec),
+                "mp_decay_window_source": "none",
+                "mp_decay_window_start_t": float("nan"),
+                "mp_decay_window_end_t": float("nan"),
+                "mp_decay_window_duration_sec": float("nan"),
+                "mp_decay_qualified": 0,
+                "mp_decay_qualified_reason": "not_executed",
+                "mp_decay_fit_status": "not_executed",
+                "mp_decay_fit_reason": "not_executed",
+                "mp_decay_fit_freq_hz": float("nan"),
+                "mp_decay_freq_jump_rel": float("nan"),
+                "mp_decay_rms_slope_1_per_sec": float("nan"),
+                "mp_decay_rms_r2": float("nan"),
+                "mp_decay_rms_n_windows": 0,
+                "mp_effective_decay_rate_1_per_sec": float("nan"),
+                "mp_half_life_sec": float("nan"),
+                "mp_freq_window_damping_per_sec": float("nan"),
+                "mp_freq_window_damping_ratio": float("nan"),
                 "mp_n_samples": 0,
                 "mp_fit_r2": float("nan"),
                 "mp_mode_count": 0,
@@ -1300,59 +1797,77 @@ class _IntervalMPPostRuntime:
         t_src = arr[:, 0]
         v_src = arr[:, 1]
 
+        live_hint_hz = float(rec.get("mp_live_freq_hint_hz", np.nan))
+        provisional_freq_hz = float(live_hint_hz)
+        if (not np.isfinite(provisional_freq_hz)) or (provisional_freq_hz <= 0.0):
+            _p_src, pw0, pw1 = _select_mp_analysis_window(
+                start_t=float(start_t),
+                end_t=float(end_t),
+                duration_sec=float(duration_sec),
+                rms_event_win_sec=float(rms_event_win_sec),
+                mp_onset_skip_sec=float(self.mp_onset_skip_sec),
+                mp_onset_window_sec=float(self.mp_onset_window_sec),
+                mp_onset_min_window_sec=float(self.mp_onset_min_window_sec),
+                mp_fallback_use_rms_event_window=bool(self.mp_fallback_use_rms_event_window),
+                mp_fallback_default_window_sec=float(self.mp_fallback_default_window_sec),
+            )
+            if np.isfinite(pw0) and np.isfinite(pw1) and (float(pw1) > float(pw0)):
+                m0 = np.isfinite(t_src) & np.isfinite(v_src) & (t_src >= float(pw0)) & (t_src <= float(pw1))
+                if int(np.count_nonzero(m0)) >= int(self.mp_min_samples):
+                    p_fit = _run_matrix_pencil_on_window(
+                        t_src[m0],
+                        v_src[m0],
+                        mp_model_order=int(self.mp_model_order),
+                        mp_max_modes=int(self.mp_max_modes),
+                        mp_freq_low_hz=float(self.mp_freq_low_hz),
+                        mp_freq_high_hz=float(self.mp_freq_high_hz),
+                        mp_min_samples=int(self.mp_min_samples),
+                        mp_dt_cv_max=float(self.mp_dt_cv_max),
+                        mp_signal_std_min=float(self.mp_signal_std_min),
+                        mp_singular_ratio_min=float(self.mp_singular_ratio_min),
+                        mp_order_selection_enabled=bool(self.mp_order_selection_enabled),
+                        mp_order_candidates=self.mp_order_candidates,
+                    )
+                    if str(p_fit.get("mp_status", "")) == "ok":
+                        f0 = float(p_fit.get("mp_dominant_freq_hz", np.nan))
+                        if np.isfinite(f0) and (f0 > 0.0):
+                            provisional_freq_hz = float(f0)
+
+        freq_profile = _adaptive_profile_from_freq(
+            float(provisional_freq_hz),
+            low_band_max_hz=float(self.mp_adaptive_low_band_max_hz),
+            high_band_min_hz=float(self.mp_adaptive_high_band_min_hz),
+        )
+        freq_window_sec = _window_sec_for_profile(
+            str(freq_profile),
+            high_sec=float(self.mp_freq_window_high_sec),
+            mid_sec=float(self.mp_freq_window_mid_sec),
+            low_sec=float(self.mp_freq_window_low_sec),
+        )
+        rec["mp_freq_profile"] = str(freq_profile)
+        rec["mp_freq_window_sec_target"] = float(freq_window_sec)
+
         window_source, w0, w1 = _select_mp_analysis_window(
             start_t=float(start_t),
             end_t=float(end_t),
             duration_sec=float(duration_sec),
             rms_event_win_sec=float(rms_event_win_sec),
             mp_onset_skip_sec=float(self.mp_onset_skip_sec),
-            mp_onset_window_sec=float(self.mp_onset_window_sec),
+            mp_onset_window_sec=float(freq_window_sec),
             mp_onset_min_window_sec=float(self.mp_onset_min_window_sec),
             mp_fallback_use_rms_event_window=bool(self.mp_fallback_use_rms_event_window),
-            mp_fallback_default_window_sec=float(self.mp_fallback_default_window_sec),
+            mp_fallback_default_window_sec=float(freq_window_sec),
         )
         if (not np.isfinite(w0)) or (not np.isfinite(w1)) or (float(w1) <= float(w0)):
             rec.update({"mp_status": "skipped", "mp_reason": "no_valid_window", "mp_window_source": str(window_source)})
             return rec
 
-        m = np.isfinite(t_src) & np.isfinite(v_src) & (t_src >= float(w0)) & (t_src <= float(w1))
-        t_win = t_src[m]
-        v_win = v_src[m]
-        v_win_clean, _edit_mask, postprep_summary = apply_modal_postprep(
-            v_win,
-            enabled=bool(self.modal_preprocess_enabled),
-            method=str(self.modal_preprocess_method),
-            hampel_half_window=int(self.modal_preprocess_hampel_half_window),
-            hampel_nsigma=float(self.modal_preprocess_hampel_nsigma),
-            max_repair_points=int(self.modal_preprocess_max_repair_points),
-            max_repair_fraction=float(self.modal_preprocess_max_repair_fraction),
-            repair_mode=str(self.modal_preprocess_repair_mode),
-            keep_raw_summary=bool(self.modal_preprocess_keep_raw_summary),
+        fit, postprep_summary, downsample_summary = self._fit_window_full(
+            t_src=t_src,
+            v_src=v_src,
+            w0=float(w0),
+            w1=float(w1),
         )
-        t_mp, v_mp, downsample_summary = _downsample_mp_window_if_needed(
-            t_win,
-            v_win_clean,
-            enabled=bool(self.mp_downsample_enabled),
-            target_fs_hz=float(self.mp_target_fs_hz),
-            lpf_cutoff_hz=float(self.mp_downsample_lpf_cutoff_hz),
-            lpf_order=int(self.mp_downsample_lpf_order),
-            min_samples=int(self.mp_min_samples),
-        )
-        fit = _run_matrix_pencil_on_window(
-            t_mp,
-            v_mp,
-            mp_model_order=int(self.mp_model_order),
-            mp_max_modes=int(self.mp_max_modes),
-            mp_freq_low_hz=float(self.mp_freq_low_hz),
-            mp_freq_high_hz=float(self.mp_freq_high_hz),
-            mp_min_samples=int(self.mp_min_samples),
-            mp_dt_cv_max=float(self.mp_dt_cv_max),
-            mp_signal_std_min=float(self.mp_signal_std_min),
-            mp_singular_ratio_min=float(self.mp_singular_ratio_min),
-            mp_order_selection_enabled=bool(self.mp_order_selection_enabled),
-            mp_order_candidates=self.mp_order_candidates,
-        )
-
         rec.update(
             {
                 "mp_status": str(fit.get("mp_status", "failed")),
@@ -1367,6 +1882,109 @@ class _IntervalMPPostRuntime:
         rec.update(fit)
         rec.update(postprep_summary)
         rec.update(downsample_summary)
+
+        dominant_freq_hz = float(rec.get("mp_dominant_freq_hz", np.nan))
+        if ((not np.isfinite(dominant_freq_hz)) or (dominant_freq_hz <= 0.0)) and np.isfinite(provisional_freq_hz):
+            dominant_freq_hz = float(provisional_freq_hz)
+            rec["mp_dominant_freq_hz"] = float(dominant_freq_hz)
+        rec["mp_freq_window_damping_per_sec"] = float(rec.get("mp_dominant_damping_per_sec", np.nan))
+        rec["mp_freq_window_damping_ratio"] = _damping_ratio_from(
+            float(dominant_freq_hz),
+            float(rec.get("mp_freq_window_damping_per_sec", np.nan)),
+        )
+
+        decay_profile = _adaptive_profile_from_freq(
+            float(dominant_freq_hz),
+            low_band_max_hz=float(self.mp_adaptive_low_band_max_hz),
+            high_band_min_hz=float(self.mp_adaptive_high_band_min_hz),
+        )
+        decay_window_sec = _window_sec_for_profile(
+            str(decay_profile),
+            high_sec=float(self.mp_decay_window_high_sec),
+            mid_sec=float(self.mp_decay_window_mid_sec),
+            low_sec=float(self.mp_decay_window_low_sec),
+        )
+        rec["mp_decay_profile"] = str(decay_profile)
+        rec["mp_decay_window_sec_target"] = float(decay_window_sec)
+        decay_source, dw0, dw1 = _select_tail_analysis_window(
+            start_t=float(start_t),
+            end_t=float(end_t),
+            duration_sec=float(duration_sec),
+            tail_window_sec=float(decay_window_sec),
+            min_window_sec=float(self.mp_onset_min_window_sec),
+        )
+        rec["mp_decay_window_source"] = str(decay_source)
+        rec["mp_decay_window_start_t"] = float(dw0)
+        rec["mp_decay_window_end_t"] = float(dw1)
+        rec["mp_decay_window_duration_sec"] = (
+            float(dw1 - dw0) if np.isfinite(dw0) and np.isfinite(dw1) and (float(dw1) > float(dw0)) else float("nan")
+        )
+
+        rec["mp_dominant_damping_per_sec"] = float("nan")
+        rec["mp_dominant_damping_ratio"] = float("nan")
+        rec["mp_effective_decay_rate_1_per_sec"] = float("nan")
+        rec["mp_half_life_sec"] = float("nan")
+
+        if str(rec.get("mp_status", "")) != "ok":
+            rec["mp_decay_qualified_reason"] = "freq_fit_not_ok"
+        elif (not np.isfinite(dw0)) or (not np.isfinite(dw1)) or (float(dw1) <= float(dw0)):
+            rec["mp_decay_qualified_reason"] = "no_valid_decay_window"
+        else:
+            decay_fit, _dec_postprep, _dec_downsample = self._fit_window_full(
+                t_src=t_src,
+                v_src=v_src,
+                w0=float(dw0),
+                w1=float(dw1),
+            )
+            rec["mp_decay_fit_status"] = str(decay_fit.get("mp_status", "failed"))
+            rec["mp_decay_fit_reason"] = str(decay_fit.get("mp_reason", "unknown"))
+            decay_freq_hz = float(decay_fit.get("mp_dominant_freq_hz", np.nan))
+            rec["mp_decay_fit_freq_hz"] = float(decay_freq_hz)
+
+            m_decay = np.isfinite(t_src) & np.isfinite(v_src) & (t_src >= float(dw0)) & (t_src <= float(dw1))
+            t_decay = t_src[m_decay]
+            v_decay = v_src[m_decay]
+            rms_decay, rms_decay_r2, rms_decay_n = _local_rms_decay_from_signal(
+                t_decay,
+                v_decay,
+                trailing_sec=float(max(0.0, float(dw1 - dw0))),
+                rms_win_sec=float(self.mp_decay_rms_win_sec),
+                step_sec=float(self.mp_decay_step_sec),
+                min_windows=int(self.mp_decay_min_windows),
+            )
+            rec["mp_decay_rms_slope_1_per_sec"] = float(rms_decay)
+            rec["mp_decay_rms_r2"] = float(rms_decay_r2)
+            rec["mp_decay_rms_n_windows"] = int(rms_decay_n)
+
+            freq_jump_rel = float("nan")
+            if np.isfinite(dominant_freq_hz) and (dominant_freq_hz > 0.0) and np.isfinite(decay_freq_hz) and (decay_freq_hz > 0.0):
+                freq_jump_rel = abs(float(decay_freq_hz) - float(dominant_freq_hz)) / max(float(dominant_freq_hz), 1e-9)
+            rec["mp_decay_freq_jump_rel"] = float(freq_jump_rel)
+
+            decay_dir_ok = np.isfinite(rms_decay) and (float(rms_decay) > 0.0)
+            decay_r2_ok = np.isfinite(rms_decay_r2) and (float(rms_decay_r2) >= float(self.mp_decay_min_r2))
+            decay_freq_ok = np.isfinite(freq_jump_rel) and (float(freq_jump_rel) <= float(self.mp_decay_freq_jump_rel_max))
+            decay_fit_ok = str(decay_fit.get("mp_status", "")) == "ok"
+
+            if decay_fit_ok and decay_dir_ok and decay_r2_ok and decay_freq_ok:
+                eff_decay = float(rms_decay)
+                rec["mp_decay_qualified"] = 1
+                rec["mp_decay_qualified_reason"] = "ok"
+                rec["mp_effective_decay_rate_1_per_sec"] = float(eff_decay)
+                rec["mp_half_life_sec"] = (float(np.log(2.0) / eff_decay) if (eff_decay > 0.0) else float("nan"))
+                rec["mp_dominant_damping_per_sec"] = float(eff_decay)
+                rec["mp_dominant_damping_ratio"] = _damping_ratio_from(float(dominant_freq_hz), float(eff_decay))
+            else:
+                reason_parts: list[str] = []
+                if not decay_fit_ok:
+                    reason_parts.append("decay_mp_fail")
+                if not decay_dir_ok:
+                    reason_parts.append("decay_direction_fail")
+                if not decay_r2_ok:
+                    reason_parts.append("decay_r2_fail")
+                if not decay_freq_ok:
+                    reason_parts.append("decay_freq_jump_fail")
+                rec["mp_decay_qualified_reason"] = "+".join(reason_parts) if reason_parts else "decay_not_qualified"
         if "mp_modes" not in rec:
             rec["mp_modes"] = []
         if "mp_mode_count" not in rec:

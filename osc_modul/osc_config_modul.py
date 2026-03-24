@@ -538,6 +538,20 @@ class MPPostAnalysisConfig:
     mp_onset_min_window_sec: float = 6.0
     mp_fallback_use_rms_event_window: bool = True
     mp_fallback_default_window_sec: float = 12.0
+    mp_update_cadence_sec: float = 10.0
+    mp_adaptive_low_band_max_hz: float = 1.0
+    mp_adaptive_high_band_min_hz: float = 5.0
+    mp_freq_window_high_sec: float = 12.0
+    mp_freq_window_mid_sec: float = 20.0
+    mp_freq_window_low_sec: float = 40.0
+    mp_decay_window_high_sec: float = 15.0
+    mp_decay_window_mid_sec: float = 25.0
+    mp_decay_window_low_sec: float = 40.0
+    mp_decay_rms_win_sec: float = 1.0
+    mp_decay_step_sec: float = 0.25
+    mp_decay_min_windows: int = 8
+    mp_decay_min_r2: float = 0.55
+    mp_decay_freq_jump_rel_max: float = 0.25
     mp_model_order: int = 8
     mp_order_selection_enabled: bool = False
     mp_order_candidates: tuple[int, ...] | None = (4, 6, 8, 10)
@@ -562,6 +576,32 @@ class MPPostAnalysisConfig:
         mode = str(self.mp_runtime_mode).strip().lower()
         if mode not in MP_RUNTIME_MODE_CHOICES:
             raise ValueError(f"mp_runtime_mode must be one of {MP_RUNTIME_MODE_CHOICES!r}")
+        if (not np.isfinite(self.mp_update_cadence_sec)) or (float(self.mp_update_cadence_sec) < 0.0):
+            raise ValueError("mp_update_cadence_sec must be >= 0")
+        if (not np.isfinite(self.mp_adaptive_low_band_max_hz)) or (float(self.mp_adaptive_low_band_max_hz) <= 0.0):
+            raise ValueError("mp_adaptive_low_band_max_hz must be positive")
+        if (not np.isfinite(self.mp_adaptive_high_band_min_hz)) or (float(self.mp_adaptive_high_band_min_hz) <= 0.0):
+            raise ValueError("mp_adaptive_high_band_min_hz must be positive")
+        if float(self.mp_adaptive_high_band_min_hz) < float(self.mp_adaptive_low_band_max_hz):
+            raise ValueError("mp_adaptive_high_band_min_hz must be >= mp_adaptive_low_band_max_hz")
+        for name, value in (
+            ("mp_freq_window_high_sec", self.mp_freq_window_high_sec),
+            ("mp_freq_window_mid_sec", self.mp_freq_window_mid_sec),
+            ("mp_freq_window_low_sec", self.mp_freq_window_low_sec),
+            ("mp_decay_window_high_sec", self.mp_decay_window_high_sec),
+            ("mp_decay_window_mid_sec", self.mp_decay_window_mid_sec),
+            ("mp_decay_window_low_sec", self.mp_decay_window_low_sec),
+            ("mp_decay_rms_win_sec", self.mp_decay_rms_win_sec),
+            ("mp_decay_step_sec", self.mp_decay_step_sec),
+        ):
+            if (not np.isfinite(value)) or (float(value) <= 0.0):
+                raise ValueError(f"{name} must be positive")
+        if int(self.mp_decay_min_windows) < 2:
+            raise ValueError("mp_decay_min_windows must be >= 2")
+        if (not np.isfinite(self.mp_decay_min_r2)) or (float(self.mp_decay_min_r2) < 0.0) or (float(self.mp_decay_min_r2) > 1.0):
+            raise ValueError("mp_decay_min_r2 must be in [0, 1]")
+        if (not np.isfinite(self.mp_decay_freq_jump_rel_max)) or (float(self.mp_decay_freq_jump_rel_max) < 0.0):
+            raise ValueError("mp_decay_freq_jump_rel_max must be >= 0")
         if int(self.mp_model_order) < 1:
             raise ValueError("mp_model_order must be >= 1")
         if self.mp_order_candidates is not None:
