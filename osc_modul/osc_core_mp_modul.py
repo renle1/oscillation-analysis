@@ -109,6 +109,176 @@ def _clean_mp_order_candidates(mp_model_order: int, mp_order_candidates: Sequenc
     return out
 
 
+def _uniform_time_axis(t0: float, t1: float, dt: float) -> np.ndarray:
+    """Build inclusive uniform axis from `t0` to `t1` at step `dt`."""
+
+    n_uniform = int(max(2, np.floor((float(t1) - float(t0)) / float(dt)) + 1))
+    t_uni = float(t0) + (np.arange(n_uniform, dtype=float) * float(dt))
+    return t_uni[t_uni <= (float(t1) + 0.5 * float(dt))]
+
+
+def _downsample_mp_window_if_needed(
+    t_arr: np.ndarray,
+    v_arr: np.ndarray,
+    *,
+    enabled: bool,
+    target_fs_hz: float,
+    lpf_cutoff_hz: float,
+    lpf_order: int,
+    min_samples: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    """Optionally apply LPF+uniform resampling before MP factorization."""
+
+    t_raw = np.asarray(t_arr, dtype=float).reshape(-1)
+    v_raw = np.asarray(v_arr, dtype=float).reshape(-1)
+    try:
+        order_eff = int(max(1, int(lpf_order)))
+    except Exception:
+        order_eff = 1
+
+    summary: dict[str, object] = {
+        "mp_downsample_enabled": bool(enabled),
+        "mp_downsample_applied": 0,
+        "mp_downsample_reason": "disabled",
+        "mp_downsample_source_fs_hz": float("nan"),
+        "mp_downsample_target_fs_hz": float(target_fs_hz) if np.isfinite(float(target_fs_hz)) else float("nan"),
+        "mp_downsample_lpf_cutoff_hz": float(lpf_cutoff_hz) if np.isfinite(float(lpf_cutoff_hz)) else float("nan"),
+        "mp_downsample_lpf_order": int(order_eff),
+        "mp_downsample_n_samples_in": int(t_raw.size),
+        "mp_downsample_n_samples_out": int(t_raw.size),
+    }
+    if not bool(enabled):
+        return t_raw, v_raw, summary
+
+    if t_raw.size != v_raw.size:
+        summary["mp_downsample_reason"] = "shape_mismatch"
+        return t_raw, v_raw, summary
+
+    m = np.isfinite(t_raw) & np.isfinite(v_raw)
+    t = t_raw[m]
+    v = v_raw[m]
+    if t.size < int(max(8, min_samples)):
+        summary.update(
+            {
+                "mp_downsample_reason": "too_few_samples",
+                "mp_downsample_n_samples_in": int(t.size),
+                "mp_downsample_n_samples_out": int(t.size),
+            }
+        )
+        return t_raw, v_raw, summary
+
+    order = np.argsort(t, kind="mergesort")
+    t = t[order]
+    v = v[order]
+    keep = np.r_[True, np.diff(t) > 0.0]
+    t = t[keep]
+    v = v[keep]
+    if t.size < int(max(8, min_samples)):
+        summary.update(
+            {
+                "mp_downsample_reason": "too_few_unique_samples",
+                "mp_downsample_n_samples_in": int(t.size),
+                "mp_downsample_n_samples_out": int(t.size),
+            }
+        )
+        return t_raw, v_raw, summary
+
+    dt_pos = np.diff(t)
+    dt_pos = dt_pos[np.isfinite(dt_pos) & (dt_pos > 0.0)]
+    if dt_pos.size < 2:
+        summary.update(
+            {
+                "mp_downsample_reason": "invalid_dt",
+                "mp_downsample_n_samples_in": int(t.size),
+                "mp_downsample_n_samples_out": int(t.size),
+            }
+        )
+        return t_raw, v_raw, summary
+
+    dt_src = float(np.median(dt_pos))
+    if (not np.isfinite(dt_src)) or (dt_src <= 0.0):
+        summary.update(
+            {
+                "mp_downsample_reason": "invalid_dt",
+                "mp_downsample_n_samples_in": int(t.size),
+                "mp_downsample_n_samples_out": int(t.size),
+            }
+        )
+        return t_raw, v_raw, summary
+
+    source_fs_hz = float(1.0 / dt_src)
+    summary["mp_downsample_source_fs_hz"] = float(source_fs_hz)
+    summary["mp_downsample_n_samples_in"] = int(t.size)
+
+    target_fs = float(target_fs_hz)
+    if (not np.isfinite(target_fs)) or (target_fs <= 0.0):
+        summary["mp_downsample_reason"] = "invalid_target_fs"
+        return t_raw, v_raw, summary
+    if source_fs_hz <= (target_fs * 1.01):
+        summary["mp_downsample_reason"] = "source_fs_not_higher_than_target"
+        return t_raw, v_raw, summary
+
+    t_uniform = _uniform_time_axis(float(t[0]), float(t[-1]), float(dt_src))
+    if t_uniform.size < int(max(8, min_samples)):
+        summary["mp_downsample_reason"] = "too_few_samples_after_uniformize"
+        return t_raw, v_raw, summary
+    x_uniform = np.interp(t_uniform, t, v)
+
+    nyq_source = 0.5 * float(source_fs_hz)
+    nyq_target = 0.5 * float(target_fs)
+    cutoff_eff = float(min(float(lpf_cutoff_hz), 0.95 * nyq_source, 0.95 * nyq_target))
+    if (not np.isfinite(cutoff_eff)) or (cutoff_eff <= 0.0):
+        summary["mp_downsample_reason"] = "invalid_cutoff"
+        return t_raw, v_raw, summary
+    summary["mp_downsample_lpf_cutoff_hz"] = float(cutoff_eff)
+
+    taps_n = int(max(15, (8 * int(order_eff)) + 1))
+    if (taps_n % 2) == 0:
+        taps_n += 1
+    max_taps = int(max(3, (2 * int(x_uniform.size)) - 1))
+    taps_n = int(min(taps_n, max_taps))
+    if (taps_n % 2) == 0:
+        taps_n = int(max(3, taps_n - 1))
+    if taps_n < 3:
+        summary["mp_downsample_reason"] = "too_few_samples_for_lpf"
+        return t_raw, v_raw, summary
+
+    n_idx = np.arange(taps_n, dtype=float) - (0.5 * float(taps_n - 1))
+    cutoff_norm = float(cutoff_eff / max(source_fs_hz, 1e-12))
+    kernel = (2.0 * cutoff_norm) * np.sinc((2.0 * cutoff_norm) * n_idx)
+    kernel = kernel * np.hamming(taps_n)
+    ksum = float(np.sum(kernel))
+    if (not np.isfinite(ksum)) or (abs(ksum) <= 1e-12):
+        summary["mp_downsample_reason"] = "invalid_lpf_kernel"
+        return t_raw, v_raw, summary
+    kernel = kernel / ksum
+
+    pad = int(taps_n // 2)
+    pad_mode = "reflect" if (x_uniform.size > 1) and (pad <= (x_uniform.size - 1)) else "edge"
+    x_pad = np.pad(x_uniform, (pad, pad), mode=pad_mode)
+    x_lpf = np.convolve(x_pad, kernel, mode="valid")
+    if x_lpf.size != x_uniform.size:
+        summary["mp_downsample_reason"] = "lpf_size_mismatch"
+        return t_raw, v_raw, summary
+
+    dt_target = float(1.0 / target_fs)
+    t_down = _uniform_time_axis(float(t_uniform[0]), float(t_uniform[-1]), float(dt_target))
+    if t_down.size < int(max(8, min_samples)):
+        summary["mp_downsample_reason"] = "too_few_samples_after_downsample"
+        return t_raw, v_raw, summary
+    v_down = np.interp(t_down, t_uniform, x_lpf)
+
+    summary.update(
+        {
+            "mp_downsample_applied": 1,
+            "mp_downsample_reason": "ok",
+            "mp_downsample_target_fs_hz": float(target_fs),
+            "mp_downsample_n_samples_out": int(t_down.size),
+        }
+    )
+    return t_down, v_down, summary
+
+
 def _prepare_mp_window_factorization(
     t_win: np.ndarray,
     v_win: np.ndarray,
@@ -704,6 +874,10 @@ class _IntervalMPPostRuntime:
         mp_dt_cv_max: float,
         mp_signal_std_min: float,
         mp_singular_ratio_min: float,
+        mp_downsample_enabled: bool,
+        mp_target_fs_hz: float,
+        mp_downsample_lpf_cutoff_hz: float,
+        mp_downsample_lpf_order: int,
         mp_order_selection_enabled: bool,
         mp_order_candidates: Sequence[int] | None,
         modal_preprocess_enabled: bool,
@@ -733,6 +907,10 @@ class _IntervalMPPostRuntime:
         self.mp_dt_cv_max = float(max(0.0, mp_dt_cv_max))
         self.mp_signal_std_min = float(max(0.0, mp_signal_std_min))
         self.mp_singular_ratio_min = float(max(0.0, mp_singular_ratio_min))
+        self.mp_downsample_enabled = bool(mp_downsample_enabled)
+        self.mp_target_fs_hz = float(max(1e-9, mp_target_fs_hz))
+        self.mp_downsample_lpf_cutoff_hz = float(max(1e-9, mp_downsample_lpf_cutoff_hz))
+        self.mp_downsample_lpf_order = int(max(1, mp_downsample_lpf_order))
         self.mp_order_selection_enabled = bool(mp_order_selection_enabled)
         self.mp_order_candidates = tuple(int(x) for x in _clean_mp_order_candidates(int(self.mp_model_order), mp_order_candidates))
         self.modal_preprocess_enabled = bool(modal_preprocess_enabled)
@@ -1035,6 +1213,15 @@ class _IntervalMPPostRuntime:
                 "mp_order_select_reason": "not_executed",
                 "mp_attempts": [],
                 "mp_modes": [],
+                "mp_downsample_enabled": bool(self.mp_downsample_enabled),
+                "mp_downsample_applied": 0,
+                "mp_downsample_reason": "disabled" if (not bool(self.mp_downsample_enabled)) else "not_applied",
+                "mp_downsample_source_fs_hz": float("nan"),
+                "mp_downsample_target_fs_hz": float(self.mp_target_fs_hz),
+                "mp_downsample_lpf_cutoff_hz": float(self.mp_downsample_lpf_cutoff_hz),
+                "mp_downsample_lpf_order": int(self.mp_downsample_lpf_order),
+                "mp_downsample_n_samples_in": 0,
+                "mp_downsample_n_samples_out": 0,
             }
         )
         return rec
@@ -1082,6 +1269,15 @@ class _IntervalMPPostRuntime:
                 "mp_order_select_reason": "not_executed",
                 "mp_attempts": [],
                 "mp_modes": [],
+                "mp_downsample_enabled": bool(self.mp_downsample_enabled),
+                "mp_downsample_applied": 0,
+                "mp_downsample_reason": "disabled" if (not bool(self.mp_downsample_enabled)) else "not_applied",
+                "mp_downsample_source_fs_hz": float("nan"),
+                "mp_downsample_target_fs_hz": float(self.mp_target_fs_hz),
+                "mp_downsample_lpf_cutoff_hz": float(self.mp_downsample_lpf_cutoff_hz),
+                "mp_downsample_lpf_order": int(self.mp_downsample_lpf_order),
+                "mp_downsample_n_samples_in": 0,
+                "mp_downsample_n_samples_out": 0,
             }
         )
         start_t = float(interval_ev.get("start_t", np.nan))
@@ -1133,9 +1329,18 @@ class _IntervalMPPostRuntime:
             repair_mode=str(self.modal_preprocess_repair_mode),
             keep_raw_summary=bool(self.modal_preprocess_keep_raw_summary),
         )
-        fit = _run_matrix_pencil_on_window(
+        t_mp, v_mp, downsample_summary = _downsample_mp_window_if_needed(
             t_win,
             v_win_clean,
+            enabled=bool(self.mp_downsample_enabled),
+            target_fs_hz=float(self.mp_target_fs_hz),
+            lpf_cutoff_hz=float(self.mp_downsample_lpf_cutoff_hz),
+            lpf_order=int(self.mp_downsample_lpf_order),
+            min_samples=int(self.mp_min_samples),
+        )
+        fit = _run_matrix_pencil_on_window(
+            t_mp,
+            v_mp,
             mp_model_order=int(self.mp_model_order),
             mp_max_modes=int(self.mp_max_modes),
             mp_freq_low_hz=float(self.mp_freq_low_hz),
@@ -1161,6 +1366,7 @@ class _IntervalMPPostRuntime:
         )
         rec.update(fit)
         rec.update(postprep_summary)
+        rec.update(downsample_summary)
         if "mp_modes" not in rec:
             rec["mp_modes"] = []
         if "mp_mode_count" not in rec:

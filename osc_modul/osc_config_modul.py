@@ -548,6 +548,10 @@ class MPPostAnalysisConfig:
     mp_dt_cv_max: float = 0.15
     mp_signal_std_min: float = 1e-5
     mp_singular_ratio_min: float = 1e-6
+    mp_downsample_enabled: bool = False
+    mp_target_fs_hz: float = 80.0
+    mp_downsample_lpf_cutoff_hz: float = 26.0
+    mp_downsample_lpf_order: int = 4
     mp_async_enabled: bool = True
     mp_queue_maxsize: int = 64
     mp_finalize_wait_sec: float = 2.0
@@ -568,6 +572,16 @@ class MPPostAnalysisConfig:
                 raise ValueError("mp_order_candidates must not be empty when provided")
             if any(int(v) < 1 for v in vals):
                 raise ValueError("all mp_order_candidates must be >= 1")
+        if (not np.isfinite(self.mp_target_fs_hz)) or (float(self.mp_target_fs_hz) <= 0.0):
+            raise ValueError("mp_target_fs_hz must be positive")
+        if (not np.isfinite(self.mp_downsample_lpf_cutoff_hz)) or (float(self.mp_downsample_lpf_cutoff_hz) <= 0.0):
+            raise ValueError("mp_downsample_lpf_cutoff_hz must be positive")
+        if int(self.mp_downsample_lpf_order) < 1:
+            raise ValueError("mp_downsample_lpf_order must be >= 1")
+        if bool(self.mp_downsample_enabled):
+            nyq_target = 0.5 * float(self.mp_target_fs_hz)
+            if float(self.mp_downsample_lpf_cutoff_hz) >= nyq_target:
+                raise ValueError("mp_downsample_lpf_cutoff_hz must be < 0.5 * mp_target_fs_hz when downsampling is enabled")
 
 
 @dataclass
