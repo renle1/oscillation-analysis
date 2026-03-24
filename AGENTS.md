@@ -3,6 +3,7 @@
 Before starting work, read the file below and use its environment settings.
 
 - `WORKSPACE_SETUP.md`
+- `md/codex_work_instructions_ko.md`
 
 Always verify these items first:
 
