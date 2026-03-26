@@ -107,7 +107,12 @@ class QualityCacheSnapshot:
 
 @dataclass
 class SignalState:
-    """FSM/core detector state that drives transitions."""
+    """FSM/core detector state that drives transitions.
+
+    `active_start_t` is kept as the legacy behavior-driving timeline anchor.
+    Shadow timestamps below are observation-only in this phase and must not be
+    used to change decision/capture behavior yet.
+    """
 
     ring: deque[tuple[float, float]] = field(default_factory=deque)
     ring_time_sorted: bool = True
@@ -116,10 +121,17 @@ class SignalState:
     evidence: float = 0.0
     active_start_t: float | None = None
     active_start_update_idx: int | None = None
+    candidate_start_t: float | None = None
+    candidate_start_update_idx: int | None = None
+    confirmed_start_t: float | None = None
+    confirmed_start_update_idx: int | None = None
+    capture_start_t: float | None = None
+    capture_start_update_idx: int | None = None
     off_candidate_start_t: float | None = None
     off_candidate_start_update_idx: int | None = None
     on_event_emitted: bool = False
     damped_streak: int = 0
+    # Debug mirror only. Source of truth: st.votes.on_short_votes.sum
     on_candidate_streak: int = 0
     warmup_on_start_t: float | None = None
     warmup_on_start_update_idx: int | None = None
@@ -185,6 +197,12 @@ class ChannelStreamState:
         "evidence",
         "active_start_t",
         "active_start_update_idx",
+        "candidate_start_t",
+        "candidate_start_update_idx",
+        "confirmed_start_t",
+        "confirmed_start_update_idx",
+        "capture_start_t",
+        "capture_start_update_idx",
         "off_candidate_start_t",
         "off_candidate_start_update_idx",
         "on_event_emitted",
@@ -329,7 +347,7 @@ class BurstChannelState:
 
 @dataclass
 class DecisionContext:
-    """FSM gate decisions grouped for one tick."""
+    """ON-entry gate decisions grouped for one tick."""
 
     accel_ok: bool
     on_conf_ok: bool
@@ -342,6 +360,16 @@ class DecisionContext:
     re_on_accel_ok: bool
     on_entry_ready: bool
     on_entry_vote_sum: int
+
+
+@dataclass
+class TransitionContext:
+    """Per-tick transition context kept separate from ON-entry gate summary."""
+
+    off_age_sec: float
+    post_off_rearm_active: bool
+    warmup_handoff_active: bool
+    re_on_active: bool
 
 
 @dataclass
@@ -625,6 +653,7 @@ __all__ = [
     "BurstVoteState",
     "BurstChannelState",
     "DecisionContext",
+    "TransitionContext",
     "TickSignalState",
     "TickQualityState",
     "TickVoteState",

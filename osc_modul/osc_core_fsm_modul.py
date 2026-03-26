@@ -41,6 +41,7 @@ from .osc_state_modul import (
     ChannelStreamState,
     SignalState,
     DecisionContext,
+    TransitionContext,
     PHASE_OFF,
     PHASE_OFF_CANDIDATE,
     PHASE_OFF_CONFIRMED,
@@ -104,6 +105,12 @@ def _finite_or_nan(v: float) -> float:
     """Convert finite numeric values to float, otherwise return np.nan."""
 
     return float(v) if np.isfinite(v) else np.nan
+
+
+def _sync_state_debug_mirrors(*, st_signal: SignalState, st_votes: VoteState) -> None:
+    """Sync debug mirrors from canonical vote-window sources."""
+
+    st_signal.on_candidate_streak = int(st_votes.on_short_votes.sum)
 
 
 def _quality_cache_from_payload(payload: dict[str, float]) -> QualityCacheSnapshot:
@@ -1220,7 +1227,7 @@ def compute_tick_features(
     st_votes.on_short_votes.append(1 if short_high else 0)
     while len(st_votes.on_short_votes) > int(th.on_short_votes_window):
         st_votes.on_short_votes.popleft()
-    st_signal.on_candidate_streak = int(st_votes.on_short_votes.sum)
+    _sync_state_debug_mirrors(st_signal=st_signal, st_votes=st_votes)
     short_trigger = bool(
         (len(st_votes.on_short_votes) >= int(th.on_short_votes_window))
         and (int(st_votes.on_short_votes.sum) >= int(th.on_consecutive_required))
@@ -1521,6 +1528,52 @@ def compute_tick_features(
     )
 
 
+def build_transition_context(
+    *,
+    tick: TickFeatures,
+    st: ChannelStreamState,
+    threshold_cfg: ThresholdConfig,
+    long_cfg: LongConfig,
+) -> TransitionContext:
+    """Build per-tick transition context separate from ON-entry gate summary."""
+
+    st_signal = st.signal
+    th = threshold_cfg
+    lg = long_cfg
+    tick_signal = tick.signal
+    tick_quality = tick.quality
+
+    gate_long_baseline_ready = bool(tick_quality.gate_long_baseline_ready)
+    warmup_cold_start_allowed = bool(not np.isfinite(st_signal.last_off_t))
+    warmup_handoff_active = bool(
+        bool(lg.warmup_long_enabled)
+        and bool(warmup_cold_start_allowed)
+        and bool(gate_long_baseline_ready)
+        and (int(st_signal.long_ready_streak) <= int(lg.warmup_handoff_grace_ticks))
+    )
+    off_age_sec = (
+        float(tick_signal.t1 - float(st_signal.last_off_t))
+        if np.isfinite(st_signal.last_off_t)
+        else float("nan")
+    )
+    re_on_active = bool(
+        np.isfinite(off_age_sec)
+        and (float(off_age_sec) >= 0.0)
+        and (float(off_age_sec) < float(th.re_on_grace_sec))
+    )
+    post_off_rearm_active = bool(
+        np.isfinite(off_age_sec)
+        and (float(off_age_sec) >= 0.0)
+        and (float(off_age_sec) < float(lg.post_off_rearm_sec))
+    )
+    return TransitionContext(
+        off_age_sec=float(off_age_sec),
+        post_off_rearm_active=bool(post_off_rearm_active),
+        warmup_handoff_active=bool(warmup_handoff_active),
+        re_on_active=bool(re_on_active),
+    )
+
+
 def build_decision_context(
     *,
     tick: TickFeatures,
@@ -1528,9 +1581,13 @@ def build_decision_context(
     threshold_cfg: ThresholdConfig,
     long_cfg: LongConfig,
     periodicity_cfg: PeriodicityConfig,
+    transition_ctx: TransitionContext | None = None,
 ) -> DecisionContext:
-    """Evaluate ON-entry using four axes: confidence/support/long-readiness/acceleration."""
-    st_signal = st.signal
+    """Evaluate ON-entry gates using a shared per-tick transition context.
+
+    Runtime should pass `transition_ctx` built once per tick. The local fallback
+    exists only for compatibility with older call paths.
+    """
     th = threshold_cfg
     lg = long_cfg
     pq = periodicity_cfg
@@ -1553,7 +1610,13 @@ def build_decision_context(
 
     feature_long_ratio_on = float(tick_signal.long_ratio_on)
     feature_short_trigger = bool(tick_signal.short_trigger)
-    warmup_cold_start_allowed = bool(not np.isfinite(st_signal.last_off_t))
+    if transition_ctx is None:
+        transition_ctx = build_transition_context(
+            tick=tick,
+            st=st,
+            threshold_cfg=th,
+            long_cfg=lg,
+        )
 
     # Confidence axis: independent from support axis.
     on_conf_ok = bool(gate_confidence_used_now >= float(pq.confidence_on_min))
@@ -1586,22 +1649,8 @@ def build_decision_context(
         bool(gate_long_baseline_ready)
         and (float(feature_long_ratio_on) >= float(lg.long_on_ratio))
     )
-    warmup_handoff_active = bool(
-        bool(lg.warmup_long_enabled)
-        and bool(warmup_cold_start_allowed)
-        and bool(gate_long_baseline_ready)
-        and (int(st_signal.long_ready_streak) <= int(lg.warmup_handoff_grace_ticks))
-    )
-    off_age_sec = (
-        float(tick_signal.t1 - float(st_signal.last_off_t))
-        if np.isfinite(st_signal.last_off_t)
-        else float("nan")
-    )
-    re_on_active = bool(
-        np.isfinite(off_age_sec)
-        and (float(off_age_sec) >= 0.0)
-        and (float(off_age_sec) < float(th.re_on_grace_sec))
-    )
+    warmup_handoff_active = bool(transition_ctx.warmup_handoff_active)
+    re_on_active = bool(transition_ctx.re_on_active)
     accel_evidence_ok = bool(
         (np.isfinite(feature_score_log_delta) and (float(feature_score_log_delta) >= float(th.on_accel_score_log_min)))
         or (np.isfinite(feature_evidence_delta) and (float(feature_evidence_delta) >= float(th.on_accel_evidence_min)))
@@ -1612,11 +1661,7 @@ def build_decision_context(
         or bool(feature_short_trigger)
     )
     re_on_accel_ok = bool((not bool(re_on_active)) or (not bool(th.re_on_require_accel)) or bool(accel_evidence_ok))
-    post_off_rearm_active = bool(
-        np.isfinite(off_age_sec)
-        and (float(off_age_sec) >= 0.0)
-        and (float(off_age_sec) < float(lg.post_off_rearm_sec))
-    )
+    post_off_rearm_active = bool(transition_ctx.post_off_rearm_active)
     if bool(state_cold_start_warmup_active):
         on_long_gate_ok = bool(gate_warmup_entry_confirmed)
     elif warmup_handoff_active:
@@ -1685,6 +1730,7 @@ def step_fsm(
     on_consecutive_required: int,
     off_confirm_min_sec: float,
     gate_flags: DecisionContext,
+    transition_ctx: TransitionContext | None = None,
 ) -> tuple[str, str]:
     """Advance phase machine using evaluated gates and current feature values."""
     st_signal = st.signal
@@ -1697,23 +1743,46 @@ def step_fsm(
             transition_reason = "off_to_on_candidate"
             st_signal.active_start_t = float(t1)
             st_signal.active_start_update_idx = int(upd_idx)
+            st_signal.candidate_start_t = float(t1)
+            st_signal.candidate_start_update_idx = int(upd_idx)
+            st_signal.confirmed_start_t = None
+            st_signal.confirmed_start_update_idx = None
+            st_signal.capture_start_t = float(t1)
+            st_signal.capture_start_update_idx = int(upd_idx)
             st_signal.on_event_emitted = False
     elif phase_now == PHASE_ON_CANDIDATE:
-        off_age_sec = (
-            float(t1 - float(st_signal.last_off_t))
-            if np.isfinite(st_signal.last_off_t)
-            else float("nan")
-        )
-        re_on_active = bool(
-            np.isfinite(off_age_sec)
-            and (float(off_age_sec) >= 0.0)
-            and (float(off_age_sec) < float(re_on_grace_sec))
-        )
+        if transition_ctx is not None:
+            re_on_active = bool(transition_ctx.re_on_active)
+        else:
+            off_age_sec = (
+                float(t1 - float(st_signal.last_off_t))
+                if np.isfinite(st_signal.last_off_t)
+                else float("nan")
+            )
+            re_on_active = bool(
+                np.isfinite(off_age_sec)
+                and (float(off_age_sec) >= 0.0)
+                and (float(off_age_sec) < float(re_on_grace_sec))
+            )
         cand_start_t = float(st_signal.active_start_t) if st_signal.active_start_t is not None else float(t1)
         if st_signal.active_start_t is None:
             st_signal.active_start_t = float(t1)
             st_signal.active_start_update_idx = int(upd_idx)
             cand_start_t = float(t1)
+        if st_signal.candidate_start_t is None:
+            st_signal.candidate_start_t = float(cand_start_t)
+            st_signal.candidate_start_update_idx = (
+                int(st_signal.active_start_update_idx)
+                if st_signal.active_start_update_idx is not None
+                else int(upd_idx)
+            )
+        if st_signal.capture_start_t is None:
+            st_signal.capture_start_t = float(cand_start_t)
+            st_signal.capture_start_update_idx = (
+                int(st_signal.active_start_update_idx)
+                if st_signal.active_start_update_idx is not None
+                else int(upd_idx)
+            )
         cand_age = float(t1 - cand_start_t)
         effective_on_confirm_min_sec = (
             float(max(float(on_confirm_min_sec), float(re_on_confirm_min_sec)))
@@ -1744,13 +1813,19 @@ def step_fsm(
             transition_reason = "on_candidate_revert_to_off"
             st_signal.active_start_t = None
             st_signal.active_start_update_idx = None
+            st_signal.candidate_start_t = None
+            st_signal.candidate_start_update_idx = None
+            st_signal.confirmed_start_t = None
+            st_signal.confirmed_start_update_idx = None
+            st_signal.capture_start_t = None
+            st_signal.capture_start_update_idx = None
             st_votes.on_short_votes.clear()
             st_votes.on_soft_votes.clear()
             st_votes.warmup_on_votes.clear()
             st_signal.warmup_on_start_t = None
             st_signal.warmup_on_start_update_idx = None
             st_signal.on_support_ema = 0.0
-            st_signal.on_candidate_streak = 0
+            _sync_state_debug_mirrors(st_signal=st_signal, st_votes=st_votes)
             st_signal.on_event_emitted = False
         elif float(cand_age) >= float(effective_on_confirm_min_sec):
             if gate_calibration_active:
@@ -1765,13 +1840,22 @@ def step_fsm(
                 if stage2_ok:
                     phase_now = PHASE_ON_CONFIRMED
                     transition_reason = "on_candidate_to_on_confirmed_soft"
+                    if st_signal.confirmed_start_t is None:
+                        st_signal.confirmed_start_t = float(t1)
+                        st_signal.confirmed_start_update_idx = int(upd_idx)
                     st_votes.on_soft_votes.clear()
                 else:
                     transition_reason = "on_candidate_wait_soft_confirm"
             else:
                 phase_now = PHASE_ON_CONFIRMED
                 transition_reason = "on_candidate_to_on_confirmed"
+                if st_signal.confirmed_start_t is None:
+                    st_signal.confirmed_start_t = float(t1)
+                    st_signal.confirmed_start_update_idx = int(upd_idx)
     elif phase_now == PHASE_ON_CONFIRMED:
+        if st_signal.confirmed_start_t is None:
+            st_signal.confirmed_start_t = float(t1)
+            st_signal.confirmed_start_update_idx = int(upd_idx)
         on_age = (
             float(t1 - float(st_signal.active_start_t))
             if (st_signal.active_start_t is not None) and np.isfinite(st_signal.active_start_t)
@@ -1806,6 +1890,9 @@ def step_fsm(
                 transition_reason = "off_candidate_revert_to_on_confirmed"
                 st_signal.off_candidate_start_t = None
                 st_signal.off_candidate_start_update_idx = None
+                if st_signal.confirmed_start_t is None:
+                    st_signal.confirmed_start_t = float(t1)
+                    st_signal.confirmed_start_update_idx = int(upd_idx)
                 st_votes.long_off_votes.clear()
             elif bool(long_off_confirmed) and (float(off_cand_age) >= float(off_confirm_min_sec)):
                 phase_now = PHASE_OFF_CONFIRMED
@@ -1823,10 +1910,16 @@ def _reset_after_off_confirm(
     st_signal.last_off_t = float(t1)
     st_signal.active_start_t = None
     st_signal.active_start_update_idx = None
-    st_signal.on_candidate_streak = 0
+    st_signal.candidate_start_t = None
+    st_signal.candidate_start_update_idx = None
+    st_signal.confirmed_start_t = None
+    st_signal.confirmed_start_update_idx = None
+    st_signal.capture_start_t = None
+    st_signal.capture_start_update_idx = None
     st_votes.on_short_votes.clear()
     st_votes.on_soft_votes.clear()
     st_votes.warmup_on_votes.clear()
+    _sync_state_debug_mirrors(st_signal=st_signal, st_votes=st_votes)
     st_signal.warmup_on_start_t = None
     st_signal.warmup_on_start_update_idx = None
     st_signal.prev_long_ratio_on = float("nan")
@@ -1871,6 +1964,20 @@ def emit_events(
         if st_signal.active_start_t is None:
             st_signal.active_start_t = float(t1)
             st_signal.active_start_update_idx = int(upd_idx)
+        if st_signal.candidate_start_t is None:
+            st_signal.candidate_start_t = float(st_signal.active_start_t)
+            st_signal.candidate_start_update_idx = (
+                int(st_signal.active_start_update_idx)
+                if st_signal.active_start_update_idx is not None
+                else int(upd_idx)
+            )
+        if st_signal.capture_start_t is None:
+            st_signal.capture_start_t = float(st_signal.active_start_t)
+            st_signal.capture_start_update_idx = (
+                int(st_signal.active_start_update_idx)
+                if st_signal.active_start_update_idx is not None
+                else int(upd_idx)
+            )
         st_signal.on_event_emitted = False
 
     if risk_now and (st_signal.active_start_t is not None) and (not st_signal.on_event_emitted):
@@ -2000,6 +2107,7 @@ __all__ = [
     "_compute_quality_and_support",
     "_compute_off_path",
     "compute_tick_features",
+    "build_transition_context",
     "build_decision_context",
     "step_fsm",
     "emit_events",

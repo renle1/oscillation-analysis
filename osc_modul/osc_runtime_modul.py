@@ -53,6 +53,7 @@ from .osc_core_fsm_modul import (
     _build_risk_event_metrics_from_kwargs,
     _emit_or_stitch_interval,
     build_decision_context,
+    build_transition_context,
     compute_tick_features,
     emit_events,
     step_fsm,
@@ -920,22 +921,23 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
             tick_vote = tick.vote
             phase_now = str(st_signal.phase)
             transition_reason = str(tick_signal.reason)
+            transition_ctx = build_transition_context(
+                tick=tick,
+                st=st,
+                threshold_cfg=th,
+                long_cfg=lg,
+            )
             decision = build_decision_context(
                 tick=tick,
                 st=st,
                 threshold_cfg=th,
                 long_cfg=lg,
                 periodicity_cfg=pq,
+                transition_ctx=transition_ctx,
             )
             gate_flags = decision
             on_entry_vote_sum = int(decision.on_entry_vote_sum)
-            warmup_cold_start_allowed = bool(not np.isfinite(st_signal.last_off_t))
-            warmup_handoff_active = bool(
-                bool(lg.warmup_long_enabled)
-                and bool(warmup_cold_start_allowed)
-                and bool(tick_quality.gate_long_baseline_ready)
-                and (int(st_signal.long_ready_streak) <= int(lg.warmup_handoff_grace_ticks))
-            )
+            warmup_handoff_active = bool(transition_ctx.warmup_handoff_active)
 
             phase_now, transition_reason = step_fsm(
                 st,
@@ -966,6 +968,7 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
                 on_consecutive_required=int(th.on_consecutive_required),
                 off_confirm_min_sec=float(th.off_confirm_min_sec),
                 gate_flags=gate_flags,
+                transition_ctx=transition_ctx,
             )
 
             _sync_interval_energy_capture(
@@ -1013,20 +1016,34 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
                 gate_re_on_active = bool(gate_flags.re_on_active)
                 gate_re_on_short_ok = bool(gate_flags.re_on_short_ok)
                 gate_re_on_accel_ok = bool(gate_flags.re_on_accel_ok)
-                off_age_sec = (
-                    float(tick_signal.t1 - float(st_signal.last_off_t))
-                    if np.isfinite(st_signal.last_off_t)
+                off_age_sec = float(transition_ctx.off_age_sec)
+                post_off_rearm_active = bool(transition_ctx.post_off_rearm_active)
+                on_votes_src = int(st_votes.on_short_votes.sum)
+                on_votes_mirror = int(st_signal.on_candidate_streak)
+                active_start_t_dbg = (
+                    float(st_signal.active_start_t)
+                    if (st_signal.active_start_t is not None) and np.isfinite(st_signal.active_start_t)
                     else float("nan")
                 )
-                post_off_rearm_active = bool(
-                    np.isfinite(off_age_sec)
-                    and (float(off_age_sec) >= 0.0)
-                    and (float(off_age_sec) < float(lg.post_off_rearm_sec))
+                candidate_start_t_dbg = (
+                    float(st_signal.candidate_start_t)
+                    if (st_signal.candidate_start_t is not None) and np.isfinite(st_signal.candidate_start_t)
+                    else float("nan")
+                )
+                confirmed_start_t_dbg = (
+                    float(st_signal.confirmed_start_t)
+                    if (st_signal.confirmed_start_t is not None) and np.isfinite(st_signal.confirmed_start_t)
+                    else float("nan")
+                )
+                capture_start_t_dbg = (
+                    float(st_signal.capture_start_t)
+                    if (st_signal.capture_start_t is not None) and np.isfinite(st_signal.capture_start_t)
+                    else float("nan")
                 )
                 status(
                     f"[TICK] upd={upd_idx:03d} | dev={key[0]} | ch={key[1]} | "
                     f"t_end={float(tick_signal.t1):.3f} | score={float(tick_signal.score):.3e} | e={float(tick_quality.e_t):+.3f} | S={float(st_signal.evidence):+.3f} | "
-                    f"phase={phase_now} | on_votes={st_signal.on_candidate_streak}/{len(st_votes.on_short_votes)} | "
+                    f"phase={phase_now} | on_votes={on_votes_src}/{len(st_votes.on_short_votes)}(dbg={on_votes_mirror}) | "
                     f"damped_streak={st_signal.damped_streak} | coll_streak={st_signal.periodicity_collapse_streak} | "
                     f"Lon={float(tick_signal.long_ratio_on):.2f} | Loff={float(tick_signal.long_ratio_off):.2f} | LoffR={float(tick_signal.long_ratio_off_recent):.2f} | "
                     f"Conf={float(tick_quality.confidence):.2f}[raw={float(tick_quality.confidence_raw):.2f},cal={float(tick_quality.confidence_cal):.2f}]"
@@ -1035,6 +1052,7 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
                     f"RMSd={float(tick_quality.rms_decay):+.3f}[n={int(tick_quality.rms_decay_n)},r2={float(tick_quality.rms_decay_r2):.2f}] | "
                     f"CALthr={float(tick_quality.gate_calibration_confidence_threshold):.2f} | Soft={float(tick_quality.feature_support_score):.2f}/{float(tick_quality.feature_support_ema):.2f} | "
                     f"SV={int(tick_vote.gate_soft_entry_vote_sum)}/{len(st_votes.on_soft_votes)} | Wv={warmup_vote_str}({int(bool(tick_vote.gate_warmup_entry_confirmed))}) | "
+                    f"TS[a={active_start_t_dbg:.3f},c={candidate_start_t_dbg:.3f},cf={confirmed_start_t_dbg:.3f},cap={capture_start_t_dbg:.3f}] | "
                     f"CUT[on={float(tick_signal.cut_on_cmp):.2e},off={float(tick_signal.cut_off_cmp):.2e}] | "
                     f"Lg={long_gate_mode}:{int(gate_on_long_ok)} | rearm={int(post_off_rearm_active)} | off_age_sec={float(off_age_sec):.3f} | "
                     f"Ev={int(on_entry_vote_sum)}/4 | Lv={off_vote_str} | "

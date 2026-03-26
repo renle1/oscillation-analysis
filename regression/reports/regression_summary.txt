@@ -1,0 +1,7 @@
+﻿Regression summary generated: 2026-03-26 23:59:31
+[spain] CLI=PASS | JSON=PASS | baseline_events=6 | candidate_events=6
+[oge] CLI=PASS | JSON=PASS | baseline_events=4 | candidate_events=4
+[scotland] CLI=PASS | JSON=PASS | baseline_events=4 | candidate_events=4
+[spain] runtime baseline=3.738s candidate=3.677s delta=-1.63%
+[oge] runtime baseline=6.436s candidate=6.342s delta=-1.46%
+[scotland] runtime baseline=4.374s candidate=4.358s delta=-0.37%

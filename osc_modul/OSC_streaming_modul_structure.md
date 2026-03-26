@@ -44,6 +44,16 @@ py -3.12 -m pip install -U numpy pandas
 - Official grouped access paths:
   - `tick.signal`, `tick.quality`, `tick.vote`
   - `st.signal`, `st.votes`, `st.cache`
+- Timestamp semantics (staged migration):
+  - `st.signal.active_start_t` remains the current behavior-driving anchor.
+  - `st.signal.candidate_start_t`, `st.signal.confirmed_start_t`, `st.signal.capture_start_t`
+    are shadow timelines for parallel observation/debug only.
+- Vote source-of-truth vs debug mirror:
+  - Source-of-truth: `st.votes.on_short_votes.sum`
+  - Debug mirror: `st.signal.on_candidate_streak`
+- Context layering:
+  - `DecisionContext`: ON-entry gate summary for current tick.
+  - `TransitionContext`: off-age/rearm/handoff/re-on transition context.
 - Official detector meaning names in new code:
   - `gate_*`, `feature_*`, `state_*`
 - Compatibility-only layers (do not add new usage):
