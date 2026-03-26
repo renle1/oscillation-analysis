@@ -67,12 +67,7 @@ def _apply_primary_mode_aliases(rec: dict[str, object]) -> dict[str, object]:
     """Expose explicit primary-mode aliases while preserving legacy MP keys."""
 
     dominant_freq_hz = float(rec.get("mp_dominant_freq_hz", np.nan))
-    dominant_signed_rate = float(
-        rec.get(
-            "mp_primary_mode_signed_rate_per_sec",
-            rec.get("mp_primary_mode_rate_per_sec", rec.get("mp_dominant_damping_per_sec", np.nan)),
-        )
-    )
+    dominant_signed_rate = _get_primary_mode_signed_rate_per_sec(rec)
     rec["mp_primary_mode_freq_hz"] = float(dominant_freq_hz)
     rec["mp_primary_mode_signed_rate_per_sec"] = float(dominant_signed_rate)
     rec["mp_primary_mode_rate_per_sec"] = float(dominant_signed_rate)
@@ -2349,17 +2344,18 @@ def _extract_window_slice(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float, float] | None:
     """Prepare current short window arrays/timing from one channel ring state."""
 
-    if not bool(st.ring_time_sorted):
-        st.ring = deque(sorted(st.ring, key=lambda x: float(x[0])))
-        st.ring_time_sorted = True
-    if not st.ring:
+    st_signal = st.signal
+    if not bool(st_signal.ring_time_sorted):
+        st_signal.ring = deque(sorted(st_signal.ring, key=lambda x: float(x[0])))
+        st_signal.ring_time_sorted = True
+    if not st_signal.ring:
         return None
 
-    t_now = float(st.ring[-1][0])
-    _trim_ring_by_time(st.ring, keep_from_t=(t_now - float(max_keep_sec)))
+    t_now = float(st_signal.ring[-1][0])
+    _trim_ring_by_time(st_signal.ring, keep_from_t=(t_now - float(max_keep_sec)))
 
-    tw0 = np.fromiter((float(x[0]) for x in st.ring), dtype=float)
-    vw0 = np.fromiter((float(x[1]) for x in st.ring), dtype=float)
+    tw0 = np.fromiter((float(x[0]) for x in st_signal.ring), dtype=float)
+    vw0 = np.fromiter((float(x[1]) for x in st_signal.ring), dtype=float)
     m = np.isfinite(tw0) & np.isfinite(vw0) & (tw0 >= (t_now - float(window_sec))) & (tw0 <= t_now)
     if np.count_nonzero(m) < 5:
         return None

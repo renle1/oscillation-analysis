@@ -1,4 +1,12 @@
-﻿"""Decision/FSM functions for modular streaming detector."""
+"""Decision/FSM functions for modular streaming detector.
+
+Canonical detector language:
+- Decision consumers use semantic gate/feature/state names.
+- New code reads state through `tick.signal|quality|vote` and `st.signal|votes|cache`.
+
+Compatibility layers (flat forwarding and legacy export wrappers) remain only to
+support old call paths and must not gain new usage.
+"""
 
 from __future__ import annotations
 
@@ -29,7 +37,9 @@ from .osc_core_signal_modul import (
     score_one_channel_equiv,
 )
 from .osc_state_modul import (
+    CacheState,
     ChannelStreamState,
+    SignalState,
     DecisionContext,
     PHASE_OFF,
     PHASE_OFF_CANDIDATE,
@@ -41,12 +51,13 @@ from .osc_state_modul import (
     TickQualityState,
     TickSignalState,
     TickVoteState,
+    VoteState,
 )
 
 
 @dataclass
 class _QualitySupportSnapshot:
-    """Per-tick quality/support bundle used to assemble TickFeatures."""
+    """Per-tick quality/support bundle with semantic gate/feature naming."""
 
     acf_peak: float
     acf_period_sec: float
@@ -72,21 +83,21 @@ class _QualitySupportSnapshot:
     rms_decay_event_r2: float
     rms_decay_event_n: int
     rms_decay_event_win_sec: float
-    long_ready: bool
-    warmup_mode: bool
+    gate_long_baseline_ready: bool
+    state_cold_start_warmup_active: bool
     e_t: float
-    delta_s_log: float
-    delta_e: float
-    accel_ok: bool
-    conf_now: float
-    raw_now: float
-    use_cal_gate: bool
-    cal_on_active: bool
-    cal_on_conf_thr: float
-    on_support: float
-    on_support_ema: float
-    on_soft_vote_sum: int
-    on_soft_confirmed: bool
+    feature_score_log_delta: float
+    feature_evidence_delta: float
+    gate_onset_acceleration_ok: bool
+    gate_confidence_used_now: float
+    gate_confidence_raw_now: float
+    gate_calibration_enabled: bool
+    state_calibration_active: bool
+    gate_calibration_confidence_threshold: float
+    feature_support_score: float
+    feature_support_ema: float
+    gate_soft_entry_vote_sum: int
+    gate_soft_entry_confirmed: bool
 
 
 def _finite_or_nan(v: float) -> float:
@@ -165,54 +176,119 @@ def _build_risk_event_metrics(
     long_n: int,
     baseline_n: int,
 ) -> dict:
-    """Build shared risk-event metrics payload."""
+    """Legacy export-wrapper for event metrics.
 
+    Compatibility shim for legacy callsites that still pass many flat kwargs.
+    Canonical semantic metric assembly belongs to runtime internal builders.
+    New code should call `_build_risk_event_metrics_from_kwargs`.
+    """
+
+    return _build_risk_event_metrics_from_kwargs(
+        {
+            "score": score,
+            "confidence": confidence,
+            "confidence_raw": confidence_raw,
+            "confidence_cal": confidence_cal,
+            "cal_on_conf_thr": cal_on_conf_thr,
+            "on_support": on_support,
+            "on_support_ema": on_support_ema,
+            "on_soft_votes_sum": on_soft_votes_sum,
+            "on_soft_votes_n": on_soft_votes_n,
+            "c_acf": c_acf,
+            "c_spec": c_spec,
+            "c_env": c_env,
+            "c_fft": c_fft,
+            "c_freq_agree": c_freq_agree,
+            "f_welch": f_welch,
+            "f_zc": f_zc,
+            "f_fft": f_fft,
+            "A_tail": A_tail,
+            "D_tail": D_tail,
+            "rms_decay": rms_decay,
+            "rms_decay_r2": rms_decay_r2,
+            "rms_decay_n": rms_decay_n,
+            "rms_decay_on_ok": rms_decay_on_ok,
+            "rms_decay_off_hint": rms_decay_off_hint,
+            "rms_decay_event": rms_decay_event,
+            "rms_decay_event_r2": rms_decay_event_r2,
+            "rms_decay_event_n": rms_decay_event_n,
+            "rms_decay_event_win_sec": rms_decay_event_win_sec,
+            "reason": reason,
+            "transition_reason": transition_reason,
+            "evidence": evidence,
+            "long_ratio_on": long_ratio_on,
+            "long_ratio_off": long_ratio_off,
+            "long_ratio_off_recent": long_ratio_off_recent,
+            "long_off_n_recent": long_off_n_recent,
+            "long_off_votes_sum": long_off_votes_sum,
+            "long_off_votes_n": long_off_votes_n,
+            "acf_peak": acf_peak,
+            "acf_period_sec": acf_period_sec,
+            "acf_lag_steps": acf_lag_steps,
+            "acf_n": acf_n,
+            "long_zmax": long_zmax,
+            "long_n": long_n,
+            "baseline_n": baseline_n,
+        }
+    )
+
+
+def _build_risk_event_metrics_from_kwargs(
+    metrics_kwargs: dict[str, object],
+) -> dict[str, object]:
+    """Build/normalize legacy risk event export payload from flat kwargs dict."""
+
+    score = float(metrics_kwargs.get("score", np.nan))
     payload = {
         "score": _finite_or_nan(score),
         "risk_score": _finite_or_nan(score),
-        "confidence": _finite_or_nan(confidence),
-        "confidence_raw": _finite_or_nan(confidence_raw),
-        "confidence_cal": _finite_or_nan(confidence_cal),
-        "cal_on_conf_thr": _finite_or_nan(cal_on_conf_thr),
-        "on_support": _finite_or_nan(on_support),
-        "on_support_ema": _finite_or_nan(on_support_ema),
-        "on_soft_votes_sum": int(on_soft_votes_sum),
-        "on_soft_votes_n": int(on_soft_votes_n),
-        "c_acf": _finite_or_nan(c_acf),
-        "c_spec": _finite_or_nan(c_spec),
-        "c_env": _finite_or_nan(c_env),
-        "c_fft": _finite_or_nan(c_fft),
-        "c_freq_agree": _finite_or_nan(c_freq_agree),
-        "f_welch": _finite_or_nan(f_welch),
-        "f_zc": _finite_or_nan(f_zc),
-        "f_fft": _finite_or_nan(f_fft),
-        "A_tail": _finite_or_nan(A_tail),
-        "D_tail": _finite_or_nan(D_tail),
-        "rms_decay_local": _finite_or_nan(rms_decay),
-        "rms_decay_local_r2": _finite_or_nan(rms_decay_r2),
-        "rms_decay_local_n": int(rms_decay_n),
-        "rms_decay_local_on_ok": int(rms_decay_on_ok),
-        "rms_decay_local_off_hint": int(rms_decay_off_hint),
-        "rms_decay_event": _finite_or_nan(rms_decay_event),
-        "rms_decay_event_r2": _finite_or_nan(rms_decay_event_r2),
-        "rms_decay_event_n": int(rms_decay_event_n),
-        "rms_decay_event_win_sec": _finite_or_nan(rms_decay_event_win_sec),
-        "reason": str(reason),
-        "transition_reason": str(transition_reason),
-        "evidence": float(evidence),
-        "long_ratio_on": _finite_or_nan(long_ratio_on),
-        "long_ratio_off": _finite_or_nan(long_ratio_off),
-        "long_ratio_off_recent": _finite_or_nan(long_ratio_off_recent),
-        "long_off_n_recent": int(long_off_n_recent),
-        "long_off_votes_sum": int(long_off_votes_sum),
-        "long_off_votes_n": int(long_off_votes_n),
-        "acf_peak": _finite_or_nan(acf_peak),
-        "acf_period_sec": _finite_or_nan(acf_period_sec),
-        "acf_lag_steps": int(acf_lag_steps),
-        "acf_n": int(acf_n),
-        "long_zmax": _finite_or_nan(long_zmax),
-        "long_n": int(long_n),
-        "baseline_n": int(baseline_n),
+        "confidence": _finite_or_nan(float(metrics_kwargs.get("confidence", np.nan))),
+        "confidence_raw": _finite_or_nan(float(metrics_kwargs.get("confidence_raw", np.nan))),
+        "confidence_cal": _finite_or_nan(float(metrics_kwargs.get("confidence_cal", np.nan))),
+        "cal_on_conf_thr": _finite_or_nan(float(metrics_kwargs.get("cal_on_conf_thr", np.nan))),
+        "on_support": _finite_or_nan(float(metrics_kwargs.get("on_support", np.nan))),
+        "on_support_ema": _finite_or_nan(float(metrics_kwargs.get("on_support_ema", np.nan))),
+        "on_soft_votes_sum": int(metrics_kwargs.get("on_soft_votes_sum", 0)),
+        "on_soft_votes_n": int(metrics_kwargs.get("on_soft_votes_n", 0)),
+        "c_acf": _finite_or_nan(float(metrics_kwargs.get("c_acf", np.nan))),
+        "c_spec": _finite_or_nan(float(metrics_kwargs.get("c_spec", np.nan))),
+        "c_env": _finite_or_nan(float(metrics_kwargs.get("c_env", np.nan))),
+        "c_fft": _finite_or_nan(float(metrics_kwargs.get("c_fft", np.nan))),
+        "c_freq_agree": _finite_or_nan(float(metrics_kwargs.get("c_freq_agree", np.nan))),
+        "f_welch": _finite_or_nan(float(metrics_kwargs.get("f_welch", np.nan))),
+        "f_zc": _finite_or_nan(float(metrics_kwargs.get("f_zc", np.nan))),
+        "f_fft": _finite_or_nan(float(metrics_kwargs.get("f_fft", np.nan))),
+        "A_tail": _finite_or_nan(float(metrics_kwargs.get("A_tail", np.nan))),
+        "D_tail": _finite_or_nan(float(metrics_kwargs.get("D_tail", np.nan))),
+        "rms_decay_local": _finite_or_nan(float(metrics_kwargs.get("rms_decay", np.nan))),
+        "rms_decay_local_r2": _finite_or_nan(float(metrics_kwargs.get("rms_decay_r2", np.nan))),
+        "rms_decay_local_n": int(metrics_kwargs.get("rms_decay_n", 0)),
+        "rms_decay_local_on_ok": int(metrics_kwargs.get("rms_decay_on_ok", 0)),
+        "rms_decay_local_off_hint": int(metrics_kwargs.get("rms_decay_off_hint", 0)),
+        "rms_decay_event": _finite_or_nan(float(metrics_kwargs.get("rms_decay_event", np.nan))),
+        "rms_decay_event_r2": _finite_or_nan(float(metrics_kwargs.get("rms_decay_event_r2", np.nan))),
+        "rms_decay_event_n": int(metrics_kwargs.get("rms_decay_event_n", 0)),
+        "rms_decay_event_win_sec": _finite_or_nan(
+            float(metrics_kwargs.get("rms_decay_event_win_sec", np.nan))
+        ),
+        "reason": str(metrics_kwargs.get("reason", "")),
+        "transition_reason": str(metrics_kwargs.get("transition_reason", "")),
+        "evidence": float(metrics_kwargs.get("evidence", np.nan)),
+        "long_ratio_on": _finite_or_nan(float(metrics_kwargs.get("long_ratio_on", np.nan))),
+        "long_ratio_off": _finite_or_nan(float(metrics_kwargs.get("long_ratio_off", np.nan))),
+        "long_ratio_off_recent": _finite_or_nan(
+            float(metrics_kwargs.get("long_ratio_off_recent", np.nan))
+        ),
+        "long_off_n_recent": int(metrics_kwargs.get("long_off_n_recent", 0)),
+        "long_off_votes_sum": int(metrics_kwargs.get("long_off_votes_sum", 0)),
+        "long_off_votes_n": int(metrics_kwargs.get("long_off_votes_n", 0)),
+        "acf_peak": _finite_or_nan(float(metrics_kwargs.get("acf_peak", np.nan))),
+        "acf_period_sec": _finite_or_nan(float(metrics_kwargs.get("acf_period_sec", np.nan))),
+        "acf_lag_steps": int(metrics_kwargs.get("acf_lag_steps", -1)),
+        "acf_n": int(metrics_kwargs.get("acf_n", 0)),
+        "long_zmax": _finite_or_nan(float(metrics_kwargs.get("long_zmax", np.nan))),
+        "long_n": int(metrics_kwargs.get("long_n", 0)),
+        "baseline_n": int(metrics_kwargs.get("baseline_n", 0)),
     }
     return payload
 
@@ -333,11 +409,14 @@ def _update_baseline_and_long_stats(
 ) -> tuple[float, float, float, float, int, float, float, int]:
     """Update baseline/long histories and compute long-window ratio stats."""
 
+    st_signal = st.signal
+    st_cache = st.cache
+
     metric_now = float(long_metric_value) if np.isfinite(long_metric_value) else float(s_log)
-    st.long_score_hist.append((float(t1), float(metric_now)))
-    _trim_score_hist_by_time(st.long_score_hist, keep_from_t=(float(t1) - float(long_window_sec)))
-    st.long_off_recent_hist.append((float(t1), float(metric_now)))
-    _trim_score_hist_by_time(st.long_off_recent_hist, keep_from_t=(float(t1) - float(long_off_recent_window_sec)))
+    st_cache.long_score_hist.append((float(t1), float(metric_now)))
+    _trim_score_hist_by_time(st_cache.long_score_hist, keep_from_t=(float(t1) - float(long_window_sec)))
+    st_cache.long_off_recent_hist.append((float(t1), float(metric_now)))
+    _trim_score_hist_by_time(st_cache.long_off_recent_hist, keep_from_t=(float(t1) - float(long_off_recent_window_sec)))
 
     event_zone_phase = str(phase_now) in {
         PHASE_ON_CANDIDATE,
@@ -345,9 +424,9 @@ def _update_baseline_and_long_stats(
         PHASE_OFF_CANDIDATE,
     }
     off_cooldown_active = bool(
-        np.isfinite(st.last_off_t)
-        and (float(t1) >= float(st.last_off_t))
-        and ((float(t1) - float(st.last_off_t)) < float(baseline_post_off_cooldown_sec))
+        np.isfinite(st_signal.last_off_t)
+        and (float(t1) >= float(st_signal.last_off_t))
+        and ((float(t1) - float(st_signal.last_off_t)) < float(baseline_post_off_cooldown_sec))
     )
     baseline_update_ok = bool(
         (not bool(risk_prev))
@@ -357,28 +436,28 @@ def _update_baseline_and_long_stats(
         and (not bool(off_cooldown_active))
     )
     if baseline_update_ok:
-        st.long_baseline_hist.append(float(s_log))
-        while len(st.long_baseline_hist) > int(long_baseline_max):
-            st.long_baseline_hist.popleft()
+        st_cache.long_baseline_hist.append(float(s_log))
+        while len(st_cache.long_baseline_hist) > int(long_baseline_max):
+            st_cache.long_baseline_hist.popleft()
 
     if bool(use_external_baseline):
         base_med, base_scale = 0.0, 1.0
     else:
-        base_med, base_scale = _robust_center_scale(st.long_baseline_hist)
+        base_med, base_scale = _robust_center_scale(st_cache.long_baseline_hist)
     long_ratio_on, long_zmax, long_n = _long_activity_ratio(
-        st.long_score_hist,
+        st_cache.long_score_hist,
         center=base_med,
         scale=base_scale,
         z_thr=float(long_z_on),
     )
     long_ratio_off, _, _ = _long_activity_ratio(
-        st.long_score_hist,
+        st_cache.long_score_hist,
         center=base_med,
         scale=base_scale,
         z_thr=float(long_z_off),
     )
     long_ratio_off_recent, _, long_off_n_recent = _long_activity_ratio(
-        st.long_off_recent_hist,
+        st_cache.long_off_recent_hist,
         center=base_med,
         scale=base_scale,
         z_thr=float(long_z_off),
@@ -503,10 +582,13 @@ def _compute_quality_and_support(
     phase_now: str,
 ) -> _QualitySupportSnapshot:
     """Compute periodicity quality, confidence/support, and evidence derivatives."""
+    st_signal = st.signal
+    st_votes = st.votes
+    st_cache = st.cache
     th = threshold_cfg
     lg = long_cfg
     pq = periodicity_cfg
-    warmup_cold_start_allowed = bool(not np.isfinite(st.last_off_t))
+    warmup_cold_start_allowed = bool(not np.isfinite(st_signal.last_off_t))
 
     warmup_conf_gate_possible = bool(
         bool(warmup_cold_start_allowed)
@@ -537,7 +619,7 @@ def _compute_quality_and_support(
     can_skip_quality_heavy = bool(
         (not bool(quality_need_context))
         and bool(quality_weak_tick)
-        and (st.last_quality is not None)
+        and (st_cache.last_quality is not None)
     )
     can_reuse_quality = bool(
         bool(pq.periodicity_quality_cache_enabled)
@@ -547,12 +629,12 @@ def _compute_quality_and_support(
         and (not bool(short_high))
         and (not bool(short_trigger))
         and (not bool(warmup_conf_gate_possible))
-        and (st.last_quality is not None)
-        and np.isfinite(st.last_quality_t_end)
-        and ((float(t1) - float(st.last_quality_t_end)) < float(periodicity_idle_refresh_sec))
+        and (st_cache.last_quality is not None)
+        and np.isfinite(st_cache.last_quality_t_end)
+        and ((float(t1) - float(st_cache.last_quality_t_end)) < float(periodicity_idle_refresh_sec))
     )
     if can_skip_quality_heavy or can_reuse_quality:
-        quality = st.last_quality if st.last_quality is not None else QualityCacheSnapshot()
+        quality = st_cache.last_quality if st_cache.last_quality is not None else QualityCacheSnapshot()
     else:
         quality = _quality_cache_from_payload(
             _compute_periodicity_quality(
@@ -571,7 +653,7 @@ def _compute_quality_and_support(
                 w_fft=float(pq.confidence_w_fft),
             )
         )
-        st.last_quality_t_end = float(t1)
+        st_cache.last_quality_t_end = float(t1)
     confidence_raw = (
         float(quality.confidence_raw)
         if np.isfinite(quality.confidence_raw)
@@ -579,7 +661,7 @@ def _compute_quality_and_support(
     )
     confidence_cal = _calibrate_confidence_quantile(
         confidence_raw,
-        conf_hist=st.conf_raw_hist,
+        conf_hist=st_cache.conf_raw_hist,
         min_points=int(pq.confidence_cal_min_points),
     )
     confidence_used = (
@@ -601,10 +683,10 @@ def _compute_quality_and_support(
     quality.rms_decay_event_n = int(rms_decay_event_n)
     quality.rms_decay_event_win_sec = float(rms_decay_event_win_sec) if np.isfinite(rms_decay_event_win_sec) else float("nan")
     if np.isfinite(confidence_raw) and ((not bool(pq.confidence_cal_off_only)) or (not bool(risk_prev))):
-        st.conf_raw_hist.append(float(confidence_raw))
-        while len(st.conf_raw_hist) > int(pq.confidence_cal_hist_max):
-            st.conf_raw_hist.popleft()
-    st.last_quality = quality
+        st_cache.conf_raw_hist.append(float(confidence_raw))
+        while len(st_cache.conf_raw_hist) > int(pq.confidence_cal_hist_max):
+            st_cache.conf_raw_hist.popleft()
+    st_cache.last_quality = quality
 
     acf_peak = float(quality.acf_peak)
     acf_period_sec = float(quality.acf_period_sec)
@@ -622,17 +704,21 @@ def _compute_quality_and_support(
     f_zc = float(quality.f_zc)
     f_fft = float(quality.f_fft)
 
-    long_ready = (
+    gate_long_baseline_ready = (
         (int(long_n) >= int(lg.long_min_points))
         and (int(baseline_n) >= int(lg.long_min_baseline))
         and np.isfinite(base_med)
         and np.isfinite(base_scale)
     )
-    if long_ready:
-        st.long_ready_streak += 1
+    if gate_long_baseline_ready:
+        st_signal.long_ready_streak += 1
     else:
-        st.long_ready_streak = 0
-    warmup_mode = bool(lg.warmup_long_enabled) and bool(warmup_cold_start_allowed) and (not bool(long_ready))
+        st_signal.long_ready_streak = 0
+    state_cold_start_warmup_active = (
+        bool(lg.warmup_long_enabled)
+        and bool(warmup_cold_start_allowed)
+        and (not bool(gate_long_baseline_ready))
+    )
 
     baseline_cut = float(cut_off_eff if risk_prev else cut_on_eff)
     score_safe = float(score) if (np.isfinite(score) and float(score) > 0.0) else (baseline_cut * 1e-12)
@@ -640,41 +726,47 @@ def _compute_quality_and_support(
     e_t = float(np.clip(np.log10(ratio), -float(th.evidence_clip), float(th.evidence_clip)))
     if str(reason) == "excluded_damped":
         damped_penalty = float(th.excluded_damped_evidence_penalty)
-        if int(st.damped_streak) >= int(th.excluded_damped_hard_penalty_streak):
+        if int(st_signal.damped_streak) >= int(th.excluded_damped_hard_penalty_streak):
             damped_penalty = float(th.evidence_clip)
         damped_penalty = float(np.clip(damped_penalty, 0.0, float(th.evidence_clip)))
         e_t = -float(damped_penalty)
     elif str(reason) != "ok":
         e_t = min(e_t, 0.0)
 
-    delta_s_log = (
-        float(s_log - float(st.prev_score_log))
-        if np.isfinite(st.prev_score_log)
+    feature_score_log_delta = (
+        float(s_log - float(st_signal.prev_score_log))
+        if np.isfinite(st_signal.prev_score_log)
         else float("nan")
     )
-    delta_e = (
-        float(e_t - float(st.prev_e_t))
-        if np.isfinite(st.prev_e_t)
+    feature_evidence_delta = (
+        float(e_t - float(st_signal.prev_e_t))
+        if np.isfinite(st_signal.prev_e_t)
         else float("nan")
     )
-    accel_ok = (
+    gate_onset_acceleration_ok = (
         (not bool(th.on_require_accel_for_candidate))
-        or (np.isfinite(delta_s_log) and (float(delta_s_log) >= float(th.on_accel_score_log_min)))
-        or (np.isfinite(delta_e) and (float(delta_e) >= float(th.on_accel_evidence_min)))
+        or (
+            np.isfinite(feature_score_log_delta)
+            and (float(feature_score_log_delta) >= float(th.on_accel_score_log_min))
+        )
+        or (
+            np.isfinite(feature_evidence_delta)
+            and (float(feature_evidence_delta) >= float(th.on_accel_evidence_min))
+        )
     )
-    st.evidence = float(th.evidence_alpha) * float(st.evidence) + (1.0 - float(th.evidence_alpha)) * e_t
-    st.prev_score_log = float(s_log)
-    st.prev_e_t = float(e_t)
+    st_signal.evidence = float(th.evidence_alpha) * float(st_signal.evidence) + (1.0 - float(th.evidence_alpha)) * e_t
+    st_signal.prev_score_log = float(s_log)
+    st_signal.prev_e_t = float(e_t)
 
-    conf_now = float(confidence) if np.isfinite(confidence) else 0.0
-    raw_now = float(confidence_raw) if np.isfinite(confidence_raw) else float("nan")
-    use_cal_gate = bool(pq.confidence_use_calibration) and np.isfinite(confidence_cal)
-    cal_on_active = bool(pq.cal_on_soft_mode) and bool(use_cal_gate)
+    gate_confidence_used_now = float(confidence) if np.isfinite(confidence) else 0.0
+    gate_confidence_raw_now = float(confidence_raw) if np.isfinite(confidence_raw) else float("nan")
+    gate_calibration_enabled = bool(pq.confidence_use_calibration) and np.isfinite(confidence_cal)
+    state_calibration_active = bool(pq.cal_on_soft_mode) and bool(gate_calibration_enabled)
 
     cal_noise_norm = _normalize01(float(base_scale), float(pq.cal_on_noise_scale_low), float(pq.cal_on_noise_scale_high))
     if not np.isfinite(cal_noise_norm):
         cal_noise_norm = 0.0
-    cal_on_conf_thr = float(np.clip(
+    gate_calibration_confidence_threshold = float(np.clip(
         float(pq.confidence_on_min) + float(pq.cal_on_conf_adapt_gain) * float(cal_noise_norm),
         float(pq.cal_on_conf_floor),
         float(pq.cal_on_conf_ceil),
@@ -690,25 +782,26 @@ def _compute_quality_and_support(
     score_support = _clip01(float(score_support_base) + float(score_acf_bonus))
     long_support = (
         _clip01(float(long_ratio_on) / max(float(lg.long_on_ratio), 1e-9))
-        if bool(long_ready)
+        if bool(gate_long_baseline_ready)
         else (
             _clip01(float(long_ratio_on) / max(float(lg.warmup_on_ratio), 1e-9))
-            if bool(warmup_mode) else 0.0
+            if bool(state_cold_start_warmup_active)
+            else 0.0
         )
     )
     d_long = (
-        float(long_ratio_on - float(st.prev_long_ratio_on))
-        if (np.isfinite(long_ratio_on) and np.isfinite(st.prev_long_ratio_on))
+        float(long_ratio_on - float(st_signal.prev_long_ratio_on))
+        if (np.isfinite(long_ratio_on) and np.isfinite(st_signal.prev_long_ratio_on))
         else float("nan")
     )
     off_age_sec = (
-        float(t1 - float(st.last_off_t))
-        if np.isfinite(st.last_off_t)
+        float(t1 - float(st_signal.last_off_t))
+        if np.isfinite(st_signal.last_off_t)
         else float("nan")
     )
     reentry_support_ctx = bool(
         bool(pq.reentry_support_suppress_enabled)
-        and np.isfinite(st.last_off_t)
+        and np.isfinite(st_signal.last_off_t)
         and (str(phase_now) in {PHASE_OFF, PHASE_ON_CANDIDATE})
         and np.isfinite(off_age_sec)
         and (float(off_age_sec) >= 0.0)
@@ -723,12 +816,16 @@ def _compute_quality_and_support(
         g_s_min = float(max(0.0, float(pq.reentry_support_growth_score_log_min)))
         g_e_min = float(max(0.0, float(pq.reentry_support_growth_evidence_min)))
         g_l_min = float(max(0.0, float(pq.reentry_support_growth_long_min)))
-        if np.isfinite(delta_s_log):
+        if np.isfinite(feature_score_log_delta):
             g_s_hi = float(max(g_s_min * 3.0, g_s_min + 1e-6, 1e-6))
-            growth_vals.append(_clip01(_normalize01(float(delta_s_log), g_s_min, g_s_hi)))
-        if np.isfinite(delta_e):
+            growth_vals.append(
+                _clip01(_normalize01(float(feature_score_log_delta), g_s_min, g_s_hi))
+            )
+        if np.isfinite(feature_evidence_delta):
             g_e_hi = float(max(g_e_min * 3.0, g_e_min + 1e-6, 1e-6))
-            growth_vals.append(_clip01(_normalize01(float(delta_e), g_e_min, g_e_hi)))
+            growth_vals.append(
+                _clip01(_normalize01(float(feature_evidence_delta), g_e_min, g_e_hi))
+            )
         if np.isfinite(d_long):
             g_l_hi = float(max(g_l_min * 3.0, g_l_min + 1e-6, 1e-6))
             growth_vals.append(_clip01(_normalize01(float(d_long), g_l_min, g_l_hi)))
@@ -742,19 +839,25 @@ def _compute_quality_and_support(
         long_support = _clip01(float(long_support) * float(long_factor))
         score_support = _clip01(float(score_support) * float(score_factor))
 
-    conf_support = _clip01(float(conf_now))
+    conf_support = _clip01(float(gate_confidence_used_now))
     accel_support_s = (
-        _clip01(float(delta_s_log) / max(abs(float(th.on_accel_score_log_min)), 1e-6))
-        if np.isfinite(delta_s_log) else float("nan")
+        _clip01(
+            float(feature_score_log_delta) / max(abs(float(th.on_accel_score_log_min)), 1e-6)
+        )
+        if np.isfinite(feature_score_log_delta)
+        else float("nan")
     )
     accel_support_e = (
-        _clip01(float(delta_e) / max(abs(float(th.on_accel_evidence_min)), 1e-6))
-        if np.isfinite(delta_e) else float("nan")
+        _clip01(
+            float(feature_evidence_delta) / max(abs(float(th.on_accel_evidence_min)), 1e-6)
+        )
+        if np.isfinite(feature_evidence_delta)
+        else float("nan")
     )
     accel_parts = [float(x) for x in (accel_support_s, accel_support_e) if np.isfinite(x)]
     accel_support = (max(accel_parts) if accel_parts else float("nan"))
     if not np.isfinite(accel_support):
-        accel_support = (1.0 if bool(accel_ok) else 0.0)
+        accel_support = (1.0 if bool(gate_onset_acceleration_ok) else 0.0)
 
     weighted_sum = 0.0
     weight_total = 0.0
@@ -769,32 +872,37 @@ def _compute_quality_and_support(
             continue
         weighted_sum += float(w) * float(x)
         weight_total += float(w)
-    on_support = (float(weighted_sum / weight_total) if weight_total > 0.0 else float("nan"))
-    if np.isfinite(on_support):
-        st.on_support_ema = (
-            float(pq.cal_on_support_ema_alpha) * float(st.on_support_ema)
-            + (1.0 - float(pq.cal_on_support_ema_alpha)) * float(on_support)
-        )
-    elif not np.isfinite(st.on_support_ema):
-        st.on_support_ema = 0.0
-    on_support_ema = float(st.on_support_ema)
-    if bool(cal_on_active) and (str(phase_now) in {PHASE_OFF, PHASE_ON_CANDIDATE}):
-        soft_vote = bool(
-            np.isfinite(on_support)
-            and (float(on_support) >= float(pq.cal_on_support_enter_min))
-            and (float(conf_now) >= float(cal_on_conf_thr))
-        )
-        st.on_soft_votes.append(1 if soft_vote else 0)
-        while len(st.on_soft_votes) > int(pq.cal_on_confirm_votes_window):
-            st.on_soft_votes.popleft()
-    else:
-        st.on_soft_votes.clear()
-    on_soft_vote_sum = int(st.on_soft_votes.sum)
-    on_soft_confirmed = bool(
-        (len(st.on_soft_votes) >= int(pq.cal_on_confirm_votes_window))
-        and (int(on_soft_vote_sum) >= int(pq.cal_on_confirm_votes_required))
+    feature_support_score = (
+        float(weighted_sum / weight_total) if weight_total > 0.0 else float("nan")
     )
-    st.prev_long_ratio_on = (float(long_ratio_on) if np.isfinite(long_ratio_on) else float("nan"))
+    if np.isfinite(feature_support_score):
+        st_signal.on_support_ema = (
+            float(pq.cal_on_support_ema_alpha) * float(st_signal.on_support_ema)
+            + (1.0 - float(pq.cal_on_support_ema_alpha)) * float(feature_support_score)
+        )
+    elif not np.isfinite(st_signal.on_support_ema):
+        st_signal.on_support_ema = 0.0
+    feature_support_ema = float(st_signal.on_support_ema)
+    if bool(state_calibration_active) and (str(phase_now) in {PHASE_OFF, PHASE_ON_CANDIDATE}):
+        soft_vote = bool(
+            np.isfinite(feature_support_score)
+            and (float(feature_support_score) >= float(pq.cal_on_support_enter_min))
+            and (
+                float(gate_confidence_used_now)
+                >= float(gate_calibration_confidence_threshold)
+            )
+        )
+        st_votes.on_soft_votes.append(1 if soft_vote else 0)
+        while len(st_votes.on_soft_votes) > int(pq.cal_on_confirm_votes_window):
+            st_votes.on_soft_votes.popleft()
+    else:
+        st_votes.on_soft_votes.clear()
+    gate_soft_entry_vote_sum = int(st_votes.on_soft_votes.sum)
+    gate_soft_entry_confirmed = bool(
+        (len(st_votes.on_soft_votes) >= int(pq.cal_on_confirm_votes_window))
+        and (int(gate_soft_entry_vote_sum) >= int(pq.cal_on_confirm_votes_required))
+    )
+    st_signal.prev_long_ratio_on = (float(long_ratio_on) if np.isfinite(long_ratio_on) else float("nan"))
 
     return _QualitySupportSnapshot(
         acf_peak=float(acf_peak),
@@ -821,21 +929,21 @@ def _compute_quality_and_support(
         rms_decay_event_r2=float(quality.rms_decay_event_r2),
         rms_decay_event_n=int(quality.rms_decay_event_n),
         rms_decay_event_win_sec=float(quality.rms_decay_event_win_sec),
-        long_ready=bool(long_ready),
-        warmup_mode=bool(warmup_mode),
+        gate_long_baseline_ready=bool(gate_long_baseline_ready),
+        state_cold_start_warmup_active=bool(state_cold_start_warmup_active),
         e_t=float(e_t),
-        delta_s_log=float(delta_s_log),
-        delta_e=float(delta_e),
-        accel_ok=bool(accel_ok),
-        conf_now=float(conf_now),
-        raw_now=float(raw_now),
-        use_cal_gate=bool(use_cal_gate),
-        cal_on_active=bool(cal_on_active),
-        cal_on_conf_thr=float(cal_on_conf_thr),
-        on_support=float(on_support),
-        on_support_ema=float(on_support_ema),
-        on_soft_vote_sum=int(on_soft_vote_sum),
-        on_soft_confirmed=bool(on_soft_confirmed),
+        feature_score_log_delta=float(feature_score_log_delta),
+        feature_evidence_delta=float(feature_evidence_delta),
+        gate_onset_acceleration_ok=bool(gate_onset_acceleration_ok),
+        gate_confidence_used_now=float(gate_confidence_used_now),
+        gate_confidence_raw_now=float(gate_confidence_raw_now),
+        gate_calibration_enabled=bool(gate_calibration_enabled),
+        state_calibration_active=bool(state_calibration_active),
+        gate_calibration_confidence_threshold=float(gate_calibration_confidence_threshold),
+        feature_support_score=float(feature_support_score),
+        feature_support_ema=float(feature_support_ema),
+        gate_soft_entry_vote_sum=int(gate_soft_entry_vote_sum),
+        gate_soft_entry_confirmed=bool(gate_soft_entry_confirmed),
     )
 
 
@@ -843,98 +951,196 @@ def _compute_off_path(
     st: ChannelStreamState,
     *,
     phase_now: str,
-    short_release: bool,
-    conf_now: float,
-    raw_now: float,
-    use_cal_gate: bool,
-    confidence_off_max: float,
-    off_periodicity_collapse_conf_raw_max: float,
-    confidence_raw_off_max_when_cal: float,
-    off_periodicity_collapse_streak_required: int,
-    long_ready: bool,
-    long_off_n_recent: int,
-    long_off_recent_min_points: int,
-    long_ratio_off_recent: float,
-    long_off_ratio: float,
-    rms_decay_local_off_hint: bool,
-    rms_decay_event_off_hint: bool,
-    long_off_votes_window: int,
-    long_off_votes_required: int,
-    damped_force_off_streak: int,
-    theta_off: float,
-    force_off_long_on_ratio: float | None,
-    force_off_require_long_not_on: bool,
-    long_ratio_on: float,
-    long_on_ratio: float,
+    feature_short_release: bool,
+    gate_confidence_used_now: float,
+    gate_confidence_raw_now: float,
+    gate_calibration_enabled: bool,
+    gate_confidence_off_max: float,
+    gate_confidence_raw_off_collapse_max: float,
+    gate_confidence_raw_off_max_when_cal: float,
+    state_periodicity_collapse_streak_required: int,
+    gate_long_baseline_ready: bool,
+    feature_long_off_recent_count: int,
+    gate_long_off_recent_min_points: int,
+    feature_long_ratio_off_recent: float,
+    gate_long_off_ratio_max: float,
+    feature_rms_decay_local_off_hint: bool,
+    feature_rms_decay_event_off_hint: bool,
+    gate_long_off_votes_window: int,
+    gate_long_off_votes_required: int,
+    gate_damped_force_off_streak: int,
+    gate_theta_off: float,
+    gate_force_off_long_on_ratio: float | None,
+    gate_force_off_require_long_not_on: bool,
+    feature_long_ratio_on: float,
+    gate_long_on_ratio_ref: float,
 ) -> tuple[bool, bool, bool, bool]:
     """Compute OFF/collapse votes and forced-OFF guard outputs."""
 
+    st_signal = st.signal
+    st_votes = st.votes
+
     off_aux_low_conf = bool(
-        (np.isfinite(conf_now) and (float(conf_now) <= float(confidence_off_max)))
-        or (np.isfinite(raw_now) and (float(raw_now) <= float(off_periodicity_collapse_conf_raw_max)))
+        (
+            np.isfinite(gate_confidence_used_now)
+            and (float(gate_confidence_used_now) <= float(gate_confidence_off_max))
+        )
         or (
-            bool(use_cal_gate)
-            and np.isfinite(raw_now)
-            and (float(raw_now) <= float(confidence_raw_off_max_when_cal))
+            np.isfinite(gate_confidence_raw_now)
+            and (float(gate_confidence_raw_now) <= float(gate_confidence_raw_off_collapse_max))
+        )
+        or (
+            bool(gate_calibration_enabled)
+            and np.isfinite(gate_confidence_raw_now)
+            and (float(gate_confidence_raw_now) <= float(gate_confidence_raw_off_max_when_cal))
         )
     )
     collapse_tick = bool(
-        bool(short_release)
+        bool(feature_short_release)
         and bool(off_aux_low_conf)
     )
     if collapse_tick:
-        st.periodicity_collapse_streak += 1
+        st_signal.periodicity_collapse_streak += 1
     else:
-        st.periodicity_collapse_streak = 0
-    collapse_ok = bool(st.periodicity_collapse_streak >= int(off_periodicity_collapse_streak_required))
+        st_signal.periodicity_collapse_streak = 0
+    collapse_ok = bool(
+        st_signal.periodicity_collapse_streak >= int(state_periodicity_collapse_streak_required)
+    )
 
     long_off_decay_drop_gate = float(np.clip(
-        float(long_ratio_on) - (0.25 * float(long_off_ratio)),
+        float(feature_long_ratio_on) - (0.25 * float(gate_long_off_ratio_max)),
         0.0,
         1.0,
     ))
     long_off_decay_recent_ok = bool(
-        np.isfinite(long_ratio_off_recent)
+        np.isfinite(feature_long_ratio_off_recent)
         and (
-            (float(long_ratio_off_recent) <= float(long_off_ratio))
-            or (float(long_ratio_off_recent) <= float(long_off_decay_drop_gate))
+            (float(feature_long_ratio_off_recent) <= float(gate_long_off_ratio_max))
+            or (float(feature_long_ratio_off_recent) <= float(long_off_decay_drop_gate))
         )
     )
     off_vote_decay = bool(
-        bool(short_release)
-        and bool(long_ready)
-        and (int(long_off_n_recent) >= int(long_off_recent_min_points))
+        bool(feature_short_release)
+        and bool(gate_long_baseline_ready)
+        and (int(feature_long_off_recent_count) >= int(gate_long_off_recent_min_points))
         and bool(long_off_decay_recent_ok)
-        and (bool(rms_decay_local_off_hint) or bool(rms_decay_event_off_hint))
+        and (bool(feature_rms_decay_local_off_hint) or bool(feature_rms_decay_event_off_hint))
     )
     off_vote_collapse = bool(
-        bool(short_release)
+        bool(feature_short_release)
         and bool(collapse_ok)
     )
     off_vote_core = bool(off_vote_collapse or off_vote_decay)
     if str(phase_now) in {PHASE_ON_CONFIRMED, PHASE_OFF_CANDIDATE}:
-        st.long_off_votes.append(1 if off_vote_core else 0)
-        while len(st.long_off_votes) > int(long_off_votes_window):
-            st.long_off_votes.popleft()
+        st_votes.long_off_votes.append(1 if off_vote_core else 0)
+        while len(st_votes.long_off_votes) > int(gate_long_off_votes_window):
+            st_votes.long_off_votes.popleft()
     else:
-        st.long_off_votes.clear()
-        st.off_candidate_start_t = None
-        st.off_candidate_start_update_idx = None
-    long_off_vote_sum = int(st.long_off_votes.sum)
+        st_votes.long_off_votes.clear()
+        st_signal.off_candidate_start_t = None
+        st_signal.off_candidate_start_update_idx = None
+    long_off_vote_sum = int(st_votes.long_off_votes.sum)
     long_off_confirmed = bool(
-        (len(st.long_off_votes) >= int(long_off_votes_window))
-        and (int(long_off_vote_sum) >= int(long_off_votes_required))
+        (len(st_votes.long_off_votes) >= int(gate_long_off_votes_window))
+        and (int(long_off_vote_sum) >= int(gate_long_off_votes_required))
     )
 
-    force_off_guard_ratio = float(long_on_ratio if force_off_long_on_ratio is None else force_off_long_on_ratio)
-    force_off_long_ok = ((not bool(long_ready)) or (float(long_ratio_on) < float(force_off_guard_ratio)))
+    force_off_guard_ratio = float(
+        gate_long_on_ratio_ref if gate_force_off_long_on_ratio is None else gate_force_off_long_on_ratio
+    )
+    force_off_long_ok = (
+        (not bool(gate_long_baseline_ready))
+        or (float(feature_long_ratio_on) < float(force_off_guard_ratio))
+    )
     force_off_now = bool(
-        (int(st.damped_streak) >= int(damped_force_off_streak))
-        and bool(short_release)
-        and (float(st.evidence) <= float(theta_off))
-        and ((not bool(force_off_require_long_not_on)) or force_off_long_ok)
+        (int(st_signal.damped_streak) >= int(gate_damped_force_off_streak))
+        and bool(feature_short_release)
+        and (float(st_signal.evidence) <= float(gate_theta_off))
+        and ((not bool(gate_force_off_require_long_not_on)) or force_off_long_ok)
     )
     return bool(collapse_ok), bool(off_vote_core), bool(long_off_confirmed), bool(force_off_now)
+
+
+def _build_tick_quality_state_from_snapshot(
+    quality_snapshot: _QualitySupportSnapshot,
+) -> TickQualityState:
+    """Build TickQualityState from semantic snapshot fields.
+
+    TickQualityState still stores legacy flat fields for compatibility.
+    This function centralizes the semantic->legacy storage mapping boundary.
+    """
+
+    quality_state = TickQualityState(
+        **_legacy_tick_quality_storage_payload_from_snapshot(quality_snapshot)
+    )
+    # Re-assert values through semantic aliases so new-code access stays meaning-first.
+    quality_state.gate_long_baseline_ready = bool(quality_snapshot.gate_long_baseline_ready)
+    quality_state.state_cold_start_warmup_active = bool(
+        quality_snapshot.state_cold_start_warmup_active
+    )
+    quality_state.gate_onset_acceleration_ok = bool(quality_snapshot.gate_onset_acceleration_ok)
+    quality_state.gate_confidence_used_now = float(quality_snapshot.gate_confidence_used_now)
+    quality_state.gate_confidence_raw_now = float(quality_snapshot.gate_confidence_raw_now)
+    quality_state.gate_calibration_enabled = bool(quality_snapshot.gate_calibration_enabled)
+    quality_state.gate_calibration_active = bool(quality_snapshot.state_calibration_active)
+    quality_state.gate_calibration_confidence_threshold = float(
+        quality_snapshot.gate_calibration_confidence_threshold
+    )
+    quality_state.feature_support_score = float(quality_snapshot.feature_support_score)
+    quality_state.feature_support_ema = float(quality_snapshot.feature_support_ema)
+    quality_state.feature_score_log_delta = float(quality_snapshot.feature_score_log_delta)
+    quality_state.feature_evidence_delta = float(quality_snapshot.feature_evidence_delta)
+    return quality_state
+
+
+def _legacy_tick_quality_storage_payload_from_snapshot(
+    quality_snapshot: _QualitySupportSnapshot,
+) -> dict[str, object]:
+    """Translate semantic snapshot values into legacy TickQualityState storage names.
+
+    This is the only semantic->legacy storage mapping table for TickQualityState.
+    New code must never consume these legacy keys directly.
+    """
+
+    return {
+        "acf_peak": float(quality_snapshot.acf_peak),
+        "acf_period_sec": float(quality_snapshot.acf_period_sec),
+        "acf_lag_steps": int(quality_snapshot.acf_lag_steps),
+        "acf_n": int(quality_snapshot.acf_n),
+        "confidence": float(quality_snapshot.confidence),
+        "confidence_raw": float(quality_snapshot.confidence_raw),
+        "confidence_cal": float(quality_snapshot.confidence_cal),
+        "c_acf": float(quality_snapshot.c_acf),
+        "c_spec": float(quality_snapshot.c_spec),
+        "c_env": float(quality_snapshot.c_env),
+        "c_fft": float(quality_snapshot.c_fft),
+        "c_freq_agree": float(quality_snapshot.c_freq_agree),
+        "f_welch": float(quality_snapshot.f_welch),
+        "f_zc": float(quality_snapshot.f_zc),
+        "f_fft": float(quality_snapshot.f_fft),
+        "rms_decay": float(quality_snapshot.rms_decay),
+        "rms_decay_r2": float(quality_snapshot.rms_decay_r2),
+        "rms_decay_n": int(quality_snapshot.rms_decay_n),
+        "rms_decay_on_ok": bool(quality_snapshot.rms_decay_on_ok),
+        "rms_decay_off_hint": bool(quality_snapshot.rms_decay_off_hint),
+        "rms_decay_event": float(quality_snapshot.rms_decay_event),
+        "rms_decay_event_r2": float(quality_snapshot.rms_decay_event_r2),
+        "rms_decay_event_n": int(quality_snapshot.rms_decay_event_n),
+        "rms_decay_event_win_sec": float(quality_snapshot.rms_decay_event_win_sec),
+        "long_ready": bool(quality_snapshot.gate_long_baseline_ready),
+        "warmup_mode": bool(quality_snapshot.state_cold_start_warmup_active),
+        "e_t": float(quality_snapshot.e_t),
+        "delta_s_log": float(quality_snapshot.feature_score_log_delta),
+        "delta_e": float(quality_snapshot.feature_evidence_delta),
+        "accel_ok": bool(quality_snapshot.gate_onset_acceleration_ok),
+        "conf_now": float(quality_snapshot.gate_confidence_used_now),
+        "raw_now": float(quality_snapshot.gate_confidence_raw_now),
+        "use_cal_gate": bool(quality_snapshot.gate_calibration_enabled),
+        "cal_on_active": bool(quality_snapshot.state_calibration_active),
+        "cal_on_conf_thr": float(quality_snapshot.gate_calibration_confidence_threshold),
+        "on_support": float(quality_snapshot.feature_support_score),
+        "on_support_ema": float(quality_snapshot.feature_support_ema),
+    }
 
 
 def compute_tick_features(
@@ -954,6 +1160,9 @@ def compute_tick_features(
     baseline_band_defs: tuple[tuple[str, float, float], ...] = (),
 ) -> TickFeatures | None:
     """Compute all per-tick feature values used by FSM decisions and event payloads."""
+    st_signal = st.signal
+    st_votes = st.votes
+    st_cache = st.cache
 
     feature_base = _extract_features(
         st,
@@ -964,20 +1173,20 @@ def compute_tick_features(
         return None
 
     tw0, vw0, tw, vw, t1, score, A_tail, D_tail, reason, score_reason_ok = feature_base
-    phase_now = str(st.signal.phase)
+    phase_now = str(st_signal.phase)
     th = threshold_cfg
     lg = long_cfg
     pq = periodicity_cfg
 
     if reason == "excluded_damped":
-        st.damped_streak += 1
+        st_signal.damped_streak += 1
     else:
-        st.damped_streak = 0
+        st_signal.damped_streak = 0
 
-    pre_base_med, pre_base_scale = _robust_center_scale(st.cache.long_baseline_hist)
+    pre_base_med, pre_base_scale = _robust_center_scale(st_cache.long_baseline_hist)
     cut_on_eff = float(cut_on)
     cut_off_eff = float(cut_off)
-    if bool(th.short_dynamic_cut_enabled) and (len(st.cache.long_baseline_hist) >= int(th.short_dynamic_min_baseline)):
+    if bool(th.short_dynamic_cut_enabled) and (len(st_cache.long_baseline_hist) >= int(th.short_dynamic_min_baseline)):
         cut_on_dyn = _dynamic_score_cut_from_log_baseline(
             base_med=pre_base_med,
             base_scale=pre_base_scale,
@@ -1006,15 +1215,15 @@ def compute_tick_features(
     cut_on_cmp = float(max(1e-18, float(cut_on_eff) * float(damped_cut_relax)))
     cut_off_cmp = float(max(1e-18, float(cut_off_eff) * float(damped_cut_relax)))
 
-    risk_prev = bool(_is_risk_active_phase(st.signal.phase))
+    risk_prev = bool(_is_risk_active_phase(st_signal.phase))
     short_high = bool(score_reason_ok and np.isfinite(score) and (float(score) >= float(cut_on_cmp)))
-    st.on_short_votes.append(1 if short_high else 0)
-    while len(st.on_short_votes) > int(th.on_short_votes_window):
-        st.on_short_votes.popleft()
-    st.on_candidate_streak = int(st.on_short_votes.sum)
+    st_votes.on_short_votes.append(1 if short_high else 0)
+    while len(st_votes.on_short_votes) > int(th.on_short_votes_window):
+        st_votes.on_short_votes.popleft()
+    st_signal.on_candidate_streak = int(st_votes.on_short_votes.sum)
     short_trigger = bool(
-        (len(st.on_short_votes) >= int(th.on_short_votes_window))
-        and (int(st.on_short_votes.sum) >= int(th.on_consecutive_required))
+        (len(st_votes.on_short_votes) >= int(th.on_short_votes_window))
+        and (int(st_votes.on_short_votes.sum) >= int(th.on_consecutive_required))
     )
 
     score_log_safe = float(score) if (np.isfinite(score) and float(score) > 0.0) else 1e-18
@@ -1032,19 +1241,19 @@ def compute_tick_features(
         risk_prev
         or short_high
         or short_trigger
-        or (str(st.signal.phase) != PHASE_OFF)
+        or (str(st_signal.phase) != PHASE_OFF)
     )
     rms_decay_idle_refresh_sec = max(float(update_sec), float(th.rms_decay_cache_refresh_sec))
     can_reuse_rms = bool(
         bool(th.rms_decay_cache_enabled)
         and (not rms_transition_active)
-        and np.isfinite(st.last_rms_decay_t_end)
-        and ((float(t1) - float(st.last_rms_decay_t_end)) < float(rms_decay_idle_refresh_sec))
+        and np.isfinite(st_cache.last_rms_decay_t_end)
+        and ((float(t1) - float(st_cache.last_rms_decay_t_end)) < float(rms_decay_idle_refresh_sec))
     )
     if can_reuse_rms:
-        rms_decay_local = float(st.last_rms_decay)
-        rms_decay_local_r2 = float(st.last_rms_decay_r2)
-        rms_decay_local_n = int(st.last_rms_decay_n)
+        rms_decay_local = float(st_cache.last_rms_decay)
+        rms_decay_local_r2 = float(st_cache.last_rms_decay_r2)
+        rms_decay_local_n = int(st_cache.last_rms_decay_n)
     else:
         rms_decay_local, rms_decay_local_r2, rms_decay_local_n = _local_rms_decay_from_signal(
             tw0,
@@ -1054,10 +1263,10 @@ def compute_tick_features(
             step_sec=float(th.rms_decay_step_sec),
             min_windows=int(th.rms_decay_min_windows),
         )
-        st.last_rms_decay = float(rms_decay_local) if np.isfinite(rms_decay_local) else float("nan")
-        st.last_rms_decay_r2 = float(rms_decay_local_r2) if np.isfinite(rms_decay_local_r2) else float("nan")
-        st.last_rms_decay_n = int(rms_decay_local_n)
-        st.last_rms_decay_t_end = float(t1)
+        st_cache.last_rms_decay = float(rms_decay_local) if np.isfinite(rms_decay_local) else float("nan")
+        st_cache.last_rms_decay_r2 = float(rms_decay_local_r2) if np.isfinite(rms_decay_local_r2) else float("nan")
+        st_cache.last_rms_decay_n = int(rms_decay_local_n)
+        st_cache.last_rms_decay_t_end = float(t1)
     rms_decay_local_on_ok = bool(
         (not bool(th.rms_decay_gate_enabled))
         or (not np.isfinite(rms_decay_local))
@@ -1075,16 +1284,16 @@ def compute_tick_features(
     rms_decay_event_win_sec = float("nan")
     if (
         bool(th.rms_decay_event_enabled)
-        and (str(st.signal.phase) in {PHASE_ON_CONFIRMED, PHASE_OFF_CANDIDATE})
-        and (st.active_start_t is not None)
-        and np.isfinite(st.active_start_t)
+        and (str(st_signal.phase) in {PHASE_ON_CONFIRMED, PHASE_OFF_CANDIDATE})
+        and (st_signal.active_start_t is not None)
+        and np.isfinite(st_signal.active_start_t)
     ):
-        event_age_sec = float(t1 - float(st.active_start_t))
+        event_age_sec = float(t1 - float(st_signal.active_start_t))
         if float(event_age_sec) >= float(th.rms_decay_event_min_window_sec):
             rms_decay_event, rms_decay_event_r2, rms_decay_event_n, rms_decay_event_win_sec = _event_rms_decay_from_signal(
                 tw0,
                 vw0,
-                event_start_t=float(st.active_start_t),
+                event_start_t=float(st_signal.active_start_t),
                 t_end=float(t1),
                 max_window_sec=float(th.rms_decay_event_max_window_sec),
                 min_window_sec=float(th.rms_decay_event_min_window_sec),
@@ -1092,17 +1301,17 @@ def compute_tick_features(
                 step_sec=float(th.rms_decay_event_step_sec),
                 min_windows=int(th.rms_decay_event_min_windows),
             )
-    st.last_rms_decay_event = float(rms_decay_event) if np.isfinite(rms_decay_event) else float("nan")
-    st.last_rms_decay_event_r2 = float(rms_decay_event_r2) if np.isfinite(rms_decay_event_r2) else float("nan")
-    st.last_rms_decay_event_n = int(rms_decay_event_n)
-    st.last_rms_decay_event_win_sec = float(rms_decay_event_win_sec) if np.isfinite(rms_decay_event_win_sec) else float("nan")
-    st.last_rms_decay_event_t_end = float(t1)
-    if str(st.signal.phase) not in {PHASE_ON_CONFIRMED, PHASE_OFF_CANDIDATE}:
-        st.rms_decay_event_peak = float("nan")
+    st_cache.last_rms_decay_event = float(rms_decay_event) if np.isfinite(rms_decay_event) else float("nan")
+    st_cache.last_rms_decay_event_r2 = float(rms_decay_event_r2) if np.isfinite(rms_decay_event_r2) else float("nan")
+    st_cache.last_rms_decay_event_n = int(rms_decay_event_n)
+    st_cache.last_rms_decay_event_win_sec = float(rms_decay_event_win_sec) if np.isfinite(rms_decay_event_win_sec) else float("nan")
+    st_cache.last_rms_decay_event_t_end = float(t1)
+    if str(st_signal.phase) not in {PHASE_ON_CONFIRMED, PHASE_OFF_CANDIDATE}:
+        st_cache.rms_decay_event_peak = float("nan")
     if np.isfinite(rms_decay_event):
-        prev_peak = float(st.rms_decay_event_peak) if np.isfinite(st.rms_decay_event_peak) else float("nan")
-        st.rms_decay_event_peak = float(rms_decay_event) if (not np.isfinite(prev_peak)) else float(max(prev_peak, float(rms_decay_event)))
-    rms_decay_event_for_hint = float(st.rms_decay_event_peak) if np.isfinite(st.rms_decay_event_peak) else float(rms_decay_event)
+        prev_peak = float(st_cache.rms_decay_event_peak) if np.isfinite(st_cache.rms_decay_event_peak) else float("nan")
+        st_cache.rms_decay_event_peak = float(rms_decay_event) if (not np.isfinite(prev_peak)) else float(max(prev_peak, float(rms_decay_event)))
+    rms_decay_event_for_hint = float(st_cache.rms_decay_event_peak) if np.isfinite(st_cache.rms_decay_event_peak) else float(rms_decay_event)
     rms_decay_event_off_hint = bool(
         bool(th.rms_decay_event_enabled)
         and np.isfinite(rms_decay_event_for_hint)
@@ -1136,7 +1345,7 @@ def compute_tick_features(
         long_z_off=float(lg.long_z_off),
         baseline_post_off_cooldown_sec=float(lg.baseline_post_off_cooldown_sec),
     )
-    baseline_n_local = int(len(st.cache.long_baseline_hist))
+    baseline_n_local = int(len(st_cache.long_baseline_hist))
     baseline_n = int(baseline_n_local)
     if bool(external_baseline_active):
         baseline_n = int(max(
@@ -1181,52 +1390,29 @@ def compute_tick_features(
         rms_decay_event_win_sec=float(rms_decay_event_win_sec),
         phase_now=str(phase_now),
     )
-    quality_state = TickQualityState(
-        acf_peak=float(quality_snapshot.acf_peak),
-        acf_period_sec=float(quality_snapshot.acf_period_sec),
-        acf_lag_steps=int(quality_snapshot.acf_lag_steps),
-        acf_n=int(quality_snapshot.acf_n),
-        confidence=float(quality_snapshot.confidence),
-        confidence_raw=float(quality_snapshot.confidence_raw),
-        confidence_cal=float(quality_snapshot.confidence_cal),
-        c_acf=float(quality_snapshot.c_acf),
-        c_spec=float(quality_snapshot.c_spec),
-        c_env=float(quality_snapshot.c_env),
-        c_fft=float(quality_snapshot.c_fft),
-        c_freq_agree=float(quality_snapshot.c_freq_agree),
-        f_welch=float(quality_snapshot.f_welch),
-        f_zc=float(quality_snapshot.f_zc),
-        f_fft=float(quality_snapshot.f_fft),
-        rms_decay=float(quality_snapshot.rms_decay),
-        rms_decay_r2=float(quality_snapshot.rms_decay_r2),
-        rms_decay_n=int(quality_snapshot.rms_decay_n),
-        rms_decay_on_ok=bool(quality_snapshot.rms_decay_on_ok),
-        rms_decay_off_hint=bool(quality_snapshot.rms_decay_off_hint),
-        rms_decay_event=float(quality_snapshot.rms_decay_event),
-        rms_decay_event_r2=float(quality_snapshot.rms_decay_event_r2),
-        rms_decay_event_n=int(quality_snapshot.rms_decay_event_n),
-        rms_decay_event_win_sec=float(quality_snapshot.rms_decay_event_win_sec),
-        long_ready=bool(quality_snapshot.long_ready),
-        warmup_mode=bool(quality_snapshot.warmup_mode),
-        e_t=float(quality_snapshot.e_t),
-        delta_s_log=float(quality_snapshot.delta_s_log),
-        delta_e=float(quality_snapshot.delta_e),
-        accel_ok=bool(quality_snapshot.accel_ok),
-        conf_now=float(quality_snapshot.conf_now),
-        raw_now=float(quality_snapshot.raw_now),
-        use_cal_gate=bool(quality_snapshot.use_cal_gate),
-        cal_on_active=bool(quality_snapshot.cal_on_active),
-        cal_on_conf_thr=float(quality_snapshot.cal_on_conf_thr),
-        on_support=float(quality_snapshot.on_support),
-        on_support_ema=float(quality_snapshot.on_support_ema),
+    gate_long_baseline_ready = bool(quality_snapshot.gate_long_baseline_ready)
+    state_cold_start_warmup_active = bool(quality_snapshot.state_cold_start_warmup_active)
+    gate_onset_acceleration_ok = bool(quality_snapshot.gate_onset_acceleration_ok)
+    gate_confidence_used_now = float(quality_snapshot.gate_confidence_used_now)
+    gate_confidence_raw_now = float(quality_snapshot.gate_confidence_raw_now)
+    gate_calibration_enabled = bool(quality_snapshot.gate_calibration_enabled)
+    state_calibration_active = bool(quality_snapshot.state_calibration_active)
+    gate_calibration_confidence_threshold = float(
+        quality_snapshot.gate_calibration_confidence_threshold
     )
+    feature_support_score = float(quality_snapshot.feature_support_score)
+    feature_support_ema = float(quality_snapshot.feature_support_ema)
+    feature_score_log_delta = float(quality_snapshot.feature_score_log_delta)
+    feature_evidence_delta = float(quality_snapshot.feature_evidence_delta)
+
+    quality_state = _build_tick_quality_state_from_snapshot(quality_snapshot)
     gate_long_baseline_ready = bool(quality_state.gate_long_baseline_ready)
     state_cold_start_warmup_active = bool(quality_state.state_cold_start_warmup_active)
     gate_confidence_used_now = float(quality_state.gate_confidence_used_now)
     gate_confidence_raw_now = float(quality_state.gate_confidence_raw_now)
     gate_calibration_enabled = bool(quality_state.gate_calibration_enabled)
-    on_soft_vote_sum = int(quality_snapshot.on_soft_vote_sum)
-    on_soft_confirmed = bool(quality_snapshot.on_soft_confirmed)
+    gate_soft_entry_vote_sum = int(quality_snapshot.gate_soft_entry_vote_sum)
+    gate_soft_entry_confirmed = bool(quality_snapshot.gate_soft_entry_confirmed)
 
     warmup_core = bool(
         bool(state_cold_start_warmup_active)
@@ -1244,28 +1430,28 @@ def compute_tick_features(
     ):
         warmup_core = False
     if (phase_now in {PHASE_OFF, PHASE_ON_CANDIDATE}) and bool(state_cold_start_warmup_active):
-        st.warmup_on_votes.append(1 if warmup_core else 0)
-        while len(st.warmup_on_votes) > int(lg.warmup_on_votes_window):
-            st.warmup_on_votes.popleft()
+        st_votes.warmup_on_votes.append(1 if warmup_core else 0)
+        while len(st_votes.warmup_on_votes) > int(lg.warmup_on_votes_window):
+            st_votes.warmup_on_votes.popleft()
         if warmup_core:
-            if st.warmup_on_start_t is None:
-                st.warmup_on_start_t = float(t1)
-                st.warmup_on_start_update_idx = int(upd_idx)
+            if st_signal.warmup_on_start_t is None:
+                st_signal.warmup_on_start_t = float(t1)
+                st_signal.warmup_on_start_update_idx = int(upd_idx)
         else:
-            st.warmup_on_start_t = None
-            st.warmup_on_start_update_idx = None
+            st_signal.warmup_on_start_t = None
+            st_signal.warmup_on_start_update_idx = None
     else:
-        st.warmup_on_votes.clear()
-        st.warmup_on_start_t = None
-        st.warmup_on_start_update_idx = None
-    warmup_vote_sum = int(st.warmup_on_votes.sum)
+        st_votes.warmup_on_votes.clear()
+        st_signal.warmup_on_start_t = None
+        st_signal.warmup_on_start_update_idx = None
+    warmup_vote_sum = int(st_votes.warmup_on_votes.sum)
     warmup_votes_ready = bool(
-        (len(st.warmup_on_votes) >= int(lg.warmup_on_votes_window))
+        (len(st_votes.warmup_on_votes) >= int(lg.warmup_on_votes_window))
         and (int(warmup_vote_sum) >= int(lg.warmup_on_votes_required))
     )
     warmup_age_sec = (
-        float(t1 - float(st.warmup_on_start_t))
-        if (st.warmup_on_start_t is not None) and np.isfinite(st.warmup_on_start_t)
+        float(t1 - float(st_signal.warmup_on_start_t))
+        if (st_signal.warmup_on_start_t is not None) and np.isfinite(st_signal.warmup_on_start_t)
         else 0.0
     )
     warmup_on_confirmed = bool(
@@ -1276,29 +1462,29 @@ def compute_tick_features(
     collapse_ok, off_vote_core, long_off_confirmed, force_off_now = _compute_off_path(
         st,
         phase_now=str(phase_now),
-        short_release=bool(short_release),
-        conf_now=float(gate_confidence_used_now),
-        raw_now=float(gate_confidence_raw_now),
-        use_cal_gate=bool(gate_calibration_enabled),
-        confidence_off_max=float(pq.confidence_off_max),
-        off_periodicity_collapse_conf_raw_max=float(th.off_periodicity_collapse_conf_raw_max),
-        confidence_raw_off_max_when_cal=float(pq.confidence_raw_off_max_when_cal),
-        off_periodicity_collapse_streak_required=int(th.off_periodicity_collapse_streak_required),
-        long_ready=bool(gate_long_baseline_ready),
-        long_off_n_recent=int(long_off_n_recent),
-        long_off_recent_min_points=int(lg.long_off_recent_min_points),
-        long_ratio_off_recent=float(long_ratio_off_recent),
-        long_off_ratio=float(lg.long_off_ratio),
-        rms_decay_local_off_hint=bool(rms_decay_local_off_hint),
-        rms_decay_event_off_hint=bool(rms_decay_event_off_hint),
-        long_off_votes_window=int(lg.long_off_votes_window),
-        long_off_votes_required=int(lg.long_off_votes_required),
-        damped_force_off_streak=int(th.damped_force_off_streak),
-        theta_off=float(th.theta_off),
-        force_off_long_on_ratio=th.force_off_long_on_ratio,
-        force_off_require_long_not_on=bool(th.force_off_require_long_not_on),
-        long_ratio_on=float(long_ratio_on),
-        long_on_ratio=float(lg.long_on_ratio),
+        feature_short_release=bool(short_release),
+        gate_confidence_used_now=float(gate_confidence_used_now),
+        gate_confidence_raw_now=float(gate_confidence_raw_now),
+        gate_calibration_enabled=bool(gate_calibration_enabled),
+        gate_confidence_off_max=float(pq.confidence_off_max),
+        gate_confidence_raw_off_collapse_max=float(th.off_periodicity_collapse_conf_raw_max),
+        gate_confidence_raw_off_max_when_cal=float(pq.confidence_raw_off_max_when_cal),
+        state_periodicity_collapse_streak_required=int(th.off_periodicity_collapse_streak_required),
+        gate_long_baseline_ready=bool(gate_long_baseline_ready),
+        feature_long_off_recent_count=int(long_off_n_recent),
+        gate_long_off_recent_min_points=int(lg.long_off_recent_min_points),
+        feature_long_ratio_off_recent=float(long_ratio_off_recent),
+        gate_long_off_ratio_max=float(lg.long_off_ratio),
+        feature_rms_decay_local_off_hint=bool(rms_decay_local_off_hint),
+        feature_rms_decay_event_off_hint=bool(rms_decay_event_off_hint),
+        gate_long_off_votes_window=int(lg.long_off_votes_window),
+        gate_long_off_votes_required=int(lg.long_off_votes_required),
+        gate_damped_force_off_streak=int(th.damped_force_off_streak),
+        gate_theta_off=float(th.theta_off),
+        gate_force_off_long_on_ratio=th.force_off_long_on_ratio,
+        gate_force_off_require_long_not_on=bool(th.force_off_require_long_not_on),
+        feature_long_ratio_on=float(long_ratio_on),
+        gate_long_on_ratio_ref=float(lg.long_on_ratio),
     )
 
     return TickFeatures(
@@ -1325,50 +1511,12 @@ def compute_tick_features(
             long_off_confirmed=bool(long_off_confirmed),
             force_off_now=bool(force_off_now),
         ),
-        quality=TickQualityState(
-            acf_peak=float(quality_state.acf_peak),
-            acf_period_sec=float(quality_state.acf_period_sec),
-            acf_lag_steps=int(quality_state.acf_lag_steps),
-            acf_n=int(quality_state.acf_n),
-            confidence=float(quality_state.confidence),
-            confidence_raw=float(quality_state.confidence_raw),
-            confidence_cal=float(quality_state.confidence_cal),
-            c_acf=float(quality_state.c_acf),
-            c_spec=float(quality_state.c_spec),
-            c_env=float(quality_state.c_env),
-            c_fft=float(quality_state.c_fft),
-            c_freq_agree=float(quality_state.c_freq_agree),
-            f_welch=float(quality_state.f_welch),
-            f_zc=float(quality_state.f_zc),
-            f_fft=float(quality_state.f_fft),
-            rms_decay=float(quality_state.rms_decay),
-            rms_decay_r2=float(quality_state.rms_decay_r2),
-            rms_decay_n=int(quality_state.rms_decay_n),
-            rms_decay_on_ok=bool(quality_state.rms_decay_on_ok),
-            rms_decay_off_hint=bool(quality_state.rms_decay_off_hint),
-            rms_decay_event=float(quality_state.rms_decay_event),
-            rms_decay_event_r2=float(quality_state.rms_decay_event_r2),
-            rms_decay_event_n=int(quality_state.rms_decay_event_n),
-            rms_decay_event_win_sec=float(quality_state.rms_decay_event_win_sec),
-            long_ready=bool(quality_state.long_ready),
-            warmup_mode=bool(quality_state.warmup_mode),
-            e_t=float(quality_state.e_t),
-            delta_s_log=float(quality_state.delta_s_log),
-            delta_e=float(quality_state.delta_e),
-            accel_ok=bool(quality_state.accel_ok),
-            conf_now=float(quality_state.conf_now),
-            raw_now=float(quality_state.raw_now),
-            use_cal_gate=bool(quality_state.use_cal_gate),
-            cal_on_active=bool(quality_state.cal_on_active),
-            cal_on_conf_thr=float(quality_state.cal_on_conf_thr),
-            on_support=float(quality_state.on_support),
-            on_support_ema=float(quality_state.on_support_ema),
-        ),
+        quality=quality_state,
         vote=TickVoteState(
             warmup_vote_sum=int(warmup_vote_sum),
             warmup_on_confirmed=bool(warmup_on_confirmed),
-            on_soft_vote_sum=int(on_soft_vote_sum),
-            on_soft_confirmed=bool(on_soft_confirmed),
+            on_soft_vote_sum=int(gate_soft_entry_vote_sum),
+            on_soft_confirmed=bool(gate_soft_entry_confirmed),
         ),
     )
 
@@ -1382,6 +1530,7 @@ def build_decision_context(
     periodicity_cfg: PeriodicityConfig,
 ) -> DecisionContext:
     """Evaluate ON-entry using four axes: confidence/support/long-readiness/acceleration."""
+    st_signal = st.signal
     th = threshold_cfg
     lg = long_cfg
     pq = periodicity_cfg
@@ -1404,7 +1553,7 @@ def build_decision_context(
 
     feature_long_ratio_on = float(tick_signal.long_ratio_on)
     feature_short_trigger = bool(tick_signal.short_trigger)
-    warmup_cold_start_allowed = bool(not np.isfinite(st.signal.last_off_t))
+    warmup_cold_start_allowed = bool(not np.isfinite(st_signal.last_off_t))
 
     # Confidence axis: independent from support axis.
     on_conf_ok = bool(gate_confidence_used_now >= float(pq.confidence_on_min))
@@ -1441,11 +1590,11 @@ def build_decision_context(
         bool(lg.warmup_long_enabled)
         and bool(warmup_cold_start_allowed)
         and bool(gate_long_baseline_ready)
-        and (int(st.signal.long_ready_streak) <= int(lg.warmup_handoff_grace_ticks))
+        and (int(st_signal.long_ready_streak) <= int(lg.warmup_handoff_grace_ticks))
     )
     off_age_sec = (
-        float(tick_signal.t1 - float(st.signal.last_off_t))
-        if np.isfinite(st.signal.last_off_t)
+        float(tick_signal.t1 - float(st_signal.last_off_t))
+        if np.isfinite(st_signal.last_off_t)
         else float("nan")
     )
     re_on_active = bool(
@@ -1516,16 +1665,16 @@ def step_fsm(
     score_reason_ok: bool,
     score: float,
     cut_off_cmp: float,
-    cal_on_active: bool,
-    on_support_ema: float,
-    cal_on_support_hold_min: float,
+    gate_calibration_active: bool,
+    feature_support_ema: float,
+    gate_calibration_support_hold_min: float,
     on_confirm_min_sec: float,
     re_on_confirm_min_sec: float,
     re_on_require_short_trigger: bool,
     re_on_require_accel: bool,
     re_on_grace_sec: float,
-    on_soft_confirmed: bool,
-    cal_on_support_confirm_min: float,
+    gate_soft_entry_confirmed: bool,
+    gate_calibration_support_confirm_min: float,
     off_hold_down_sec: float,
     short_trigger: bool,
     short_high: bool,
@@ -1538,19 +1687,21 @@ def step_fsm(
     gate_flags: DecisionContext,
 ) -> tuple[str, str]:
     """Advance phase machine using evaluated gates and current feature values."""
+    st_signal = st.signal
+    st_votes = st.votes
 
     transition_reason = str(reason)
     if phase_now == PHASE_OFF:
         if gate_flags.on_entry_ready:
             phase_now = PHASE_ON_CANDIDATE
             transition_reason = "off_to_on_candidate"
-            st.active_start_t = float(t1)
-            st.active_start_update_idx = int(upd_idx)
-            st.on_event_emitted = False
+            st_signal.active_start_t = float(t1)
+            st_signal.active_start_update_idx = int(upd_idx)
+            st_signal.on_event_emitted = False
     elif phase_now == PHASE_ON_CANDIDATE:
         off_age_sec = (
-            float(t1 - float(st.last_off_t))
-            if np.isfinite(st.last_off_t)
+            float(t1 - float(st_signal.last_off_t))
+            if np.isfinite(st_signal.last_off_t)
             else float("nan")
         )
         re_on_active = bool(
@@ -1558,10 +1709,10 @@ def step_fsm(
             and (float(off_age_sec) >= 0.0)
             and (float(off_age_sec) < float(re_on_grace_sec))
         )
-        cand_start_t = float(st.active_start_t) if st.active_start_t is not None else float(t1)
-        if st.active_start_t is None:
-            st.active_start_t = float(t1)
-            st.active_start_update_idx = int(upd_idx)
+        cand_start_t = float(st_signal.active_start_t) if st_signal.active_start_t is not None else float(t1)
+        if st_signal.active_start_t is None:
+            st_signal.active_start_t = float(t1)
+            st_signal.active_start_update_idx = int(upd_idx)
             cand_start_t = float(t1)
         cand_age = float(t1 - cand_start_t)
         effective_on_confirm_min_sec = (
@@ -1573,12 +1724,15 @@ def step_fsm(
             bool(short_trigger)
             or (score_reason_ok and np.isfinite(score) and (float(score) >= float(cut_off_cmp)))
         )
-        if cal_on_active:
+        if gate_calibration_active:
             keep_candidate = bool(
                 keep_candidate
                 or (
-                    np.isfinite(on_support_ema)
-                    and (float(on_support_ema) >= float(cal_on_support_hold_min))
+                    np.isfinite(feature_support_ema)
+                    and (
+                        float(feature_support_ema)
+                        >= float(gate_calibration_support_hold_min)
+                    )
                 )
             )
         if bool(re_on_active) and bool(re_on_require_short_trigger):
@@ -1588,27 +1742,30 @@ def step_fsm(
         if not keep_candidate:
             phase_now = PHASE_OFF
             transition_reason = "on_candidate_revert_to_off"
-            st.active_start_t = None
-            st.active_start_update_idx = None
-            st.on_short_votes.clear()
-            st.on_soft_votes.clear()
-            st.warmup_on_votes.clear()
-            st.warmup_on_start_t = None
-            st.warmup_on_start_update_idx = None
-            st.on_support_ema = 0.0
-            st.on_candidate_streak = 0
-            st.on_event_emitted = False
+            st_signal.active_start_t = None
+            st_signal.active_start_update_idx = None
+            st_votes.on_short_votes.clear()
+            st_votes.on_soft_votes.clear()
+            st_votes.warmup_on_votes.clear()
+            st_signal.warmup_on_start_t = None
+            st_signal.warmup_on_start_update_idx = None
+            st_signal.on_support_ema = 0.0
+            st_signal.on_candidate_streak = 0
+            st_signal.on_event_emitted = False
         elif float(cand_age) >= float(effective_on_confirm_min_sec):
-            if cal_on_active:
+            if gate_calibration_active:
                 stage2_ok = bool(
-                    on_soft_confirmed
-                    and np.isfinite(on_support_ema)
-                    and (float(on_support_ema) >= float(cal_on_support_confirm_min))
+                    gate_soft_entry_confirmed
+                    and np.isfinite(feature_support_ema)
+                    and (
+                        float(feature_support_ema)
+                        >= float(gate_calibration_support_confirm_min)
+                    )
                 )
                 if stage2_ok:
                     phase_now = PHASE_ON_CONFIRMED
                     transition_reason = "on_candidate_to_on_confirmed_soft"
-                    st.on_soft_votes.clear()
+                    st_votes.on_soft_votes.clear()
                 else:
                     transition_reason = "on_candidate_wait_soft_confirm"
             else:
@@ -1616,44 +1773,73 @@ def step_fsm(
                 transition_reason = "on_candidate_to_on_confirmed"
     elif phase_now == PHASE_ON_CONFIRMED:
         on_age = (
-            float(t1 - float(st.active_start_t))
-            if (st.active_start_t is not None) and np.isfinite(st.active_start_t)
+            float(t1 - float(st_signal.active_start_t))
+            if (st_signal.active_start_t is not None) and np.isfinite(st_signal.active_start_t)
             else float("inf")
         )
-        st.on_soft_votes.clear()
+        st_votes.on_soft_votes.clear()
         if bool(force_off_now):
             phase_now = PHASE_OFF_CONFIRMED
             transition_reason = "forced_off_damped_with_low_evidence"
         elif (float(on_age) >= float(off_hold_down_sec)) and bool(off_vote_core):
             phase_now = PHASE_OFF_CANDIDATE
             transition_reason = "on_confirmed_to_off_candidate"
-            if st.off_candidate_start_t is None:
-                st.off_candidate_start_t = float(t1)
-                st.off_candidate_start_update_idx = int(upd_idx)
+            if st_signal.off_candidate_start_t is None:
+                st_signal.off_candidate_start_t = float(t1)
+                st_signal.off_candidate_start_update_idx = int(upd_idx)
     elif phase_now == PHASE_OFF_CANDIDATE:
         if bool(force_off_now):
             phase_now = PHASE_OFF_CONFIRMED
             transition_reason = "forced_off_damped_with_low_evidence"
         else:
-            if st.off_candidate_start_t is None:
-                st.off_candidate_start_t = float(t1)
-                st.off_candidate_start_update_idx = int(upd_idx)
-            off_cand_age = float(t1 - float(st.off_candidate_start_t))
+            if st_signal.off_candidate_start_t is None:
+                st_signal.off_candidate_start_t = float(t1)
+                st_signal.off_candidate_start_update_idx = int(upd_idx)
+            off_cand_age = float(t1 - float(st_signal.off_candidate_start_t))
             recover_to_on = bool(
                 short_high
-                and (int(st.on_short_votes.sum) >= int(on_consecutive_required))
+                and (int(st_votes.on_short_votes.sum) >= int(on_consecutive_required))
                 and (not bool(collapse_ok))
             )
             if recover_to_on:
                 phase_now = PHASE_ON_CONFIRMED
                 transition_reason = "off_candidate_revert_to_on_confirmed"
-                st.off_candidate_start_t = None
-                st.off_candidate_start_update_idx = None
-                st.long_off_votes.clear()
+                st_signal.off_candidate_start_t = None
+                st_signal.off_candidate_start_update_idx = None
+                st_votes.long_off_votes.clear()
             elif bool(long_off_confirmed) and (float(off_cand_age) >= float(off_confirm_min_sec)):
                 phase_now = PHASE_OFF_CONFIRMED
                 transition_reason = "off_candidate_to_off_confirmed"
     return str(phase_now), str(transition_reason)
+
+
+def _reset_after_off_confirm(
+    st_signal: SignalState,
+    st_votes: VoteState,
+    st_cache: CacheState,
+    t1: float,
+) -> None:
+    """Reset FSM vote/state caches immediately after OFF confirmation."""
+    st_signal.last_off_t = float(t1)
+    st_signal.active_start_t = None
+    st_signal.active_start_update_idx = None
+    st_signal.on_candidate_streak = 0
+    st_votes.on_short_votes.clear()
+    st_votes.on_soft_votes.clear()
+    st_votes.warmup_on_votes.clear()
+    st_signal.warmup_on_start_t = None
+    st_signal.warmup_on_start_update_idx = None
+    st_signal.prev_long_ratio_on = float("nan")
+    st_signal.on_support_ema = 0.0
+    st_votes.long_off_votes.clear()
+    # Keep long-baseline store, but reset event-memory histories on OFF confirm.
+    st_cache.long_score_hist.clear()
+    st_cache.long_off_recent_hist.clear()
+    st_signal.long_ready_streak = 0
+    st_signal.off_candidate_start_t = None
+    st_signal.off_candidate_start_update_idx = None
+    st_signal.on_event_emitted = False
+    st_signal.phase = PHASE_OFF
 
 
 def emit_events(
@@ -1677,15 +1863,18 @@ def emit_events(
     status_cb: Callable[[str], None] | None = None,
 ) -> tuple[int, int, int]:
     """Emit risk transition events and interval records for one tick."""
+    st_signal = st.signal
+    st_votes = st.votes
+    st_cache = st.cache
 
-    if risk_now and (not st.last_risk_on):
-        if st.active_start_t is None:
-            st.active_start_t = float(t1)
-            st.active_start_update_idx = int(upd_idx)
-        st.on_event_emitted = False
+    if risk_now and (not st_signal.last_risk_on):
+        if st_signal.active_start_t is None:
+            st_signal.active_start_t = float(t1)
+            st_signal.active_start_update_idx = int(upd_idx)
+        st_signal.on_event_emitted = False
 
-    if risk_now and (st.active_start_t is not None) and (not st.on_event_emitted):
-        on_duration = float(t1 - float(st.active_start_t))
+    if risk_now and (st_signal.active_start_t is not None) and (not st_signal.on_event_emitted):
+        on_duration = float(t1 - float(st_signal.active_start_t))
         if on_duration >= float(min_interval_sec_for_alert):
             ev = {
                 "event": "risk_on",
@@ -1693,25 +1882,25 @@ def emit_events(
                 "device": str(key[0]),
                 "channel": str(key[1]),
                 "t_end": float(t1),
-                "start_t": float(st.active_start_t),
-                "start_update_idx": int(st.active_start_update_idx) if st.active_start_update_idx is not None else int(upd_idx),
-                **_build_risk_event_metrics(**metrics_kwargs),
+                "start_t": float(st_signal.active_start_t),
+                "start_update_idx": int(st_signal.active_start_update_idx) if st_signal.active_start_update_idx is not None else int(upd_idx),
+                **_build_risk_event_metrics_from_kwargs(metrics_kwargs),
             }
             events.append(ev)
             if status_cb is not None:
                 status_cb(
                     f"[ALERT] RISK_ON | upd={upd_idx:03d} | dev={key[0]} | ch={key[1]} | "
-                    f"start={float(st.active_start_t):.3f} | t_end={t1:.3f} | score={float(metrics_kwargs.get('score', np.nan)):.3e} | "
-                    f"S={float(metrics_kwargs.get('evidence', st.evidence)):+.3f} | duration={on_duration:.3f}s"
+                    f"start={float(st_signal.active_start_t):.3f} | t_end={t1:.3f} | score={float(metrics_kwargs.get('score', np.nan)):.3e} | "
+                    f"S={float(metrics_kwargs.get('evidence', st_signal.evidence)):+.3f} | duration={on_duration:.3f}s"
                 )
             if on_event is not None:
                 on_event(ev)
-            st.on_event_emitted = True
+            st_signal.on_event_emitted = True
         return int(raw_risk_interval_count), int(suppressed_interval_count), int(next_interval_id)
 
-    if (not risk_now) and st.last_risk_on:
-        start_t = float(st.active_start_t) if st.active_start_t is not None else float("nan")
-        start_idx = int(st.active_start_update_idx) if st.active_start_update_idx is not None else -1
+    if (not risk_now) and st_signal.last_risk_on:
+        start_t = float(st_signal.active_start_t) if st_signal.active_start_t is not None else float("nan")
+        start_idx = int(st_signal.active_start_update_idx) if st_signal.active_start_update_idx is not None else -1
         duration_sec = float(t1 - start_t) if np.isfinite(start_t) else float("nan")
         raw_risk_interval_count += 1
         if np.isfinite(duration_sec) and (duration_sec < float(min_interval_sec_for_alert)):
@@ -1723,7 +1912,7 @@ def emit_events(
                     f"duration={duration_sec:.3f}s < min={float(min_interval_sec_for_alert):.3f}s"
                 )
         else:
-            if (not st.on_event_emitted) and np.isfinite(start_t):
+            if (not st_signal.on_event_emitted) and np.isfinite(start_t):
                 delayed_on_metrics = dict(metrics_kwargs)
                 delayed_on_metrics["transition_reason"] = "delayed_emit_before_off"
                 on_ev = {
@@ -1734,7 +1923,7 @@ def emit_events(
                     "t_end": float(start_t),
                     "start_t": start_t,
                     "start_update_idx": int(start_idx),
-                    **_build_risk_event_metrics(**delayed_on_metrics),
+                    **_build_risk_event_metrics_from_kwargs(delayed_on_metrics),
                 }
                 events.append(on_ev)
                 if on_event is not None:
@@ -1753,7 +1942,7 @@ def emit_events(
                 "end_t": float(t1),
                 "end_update_idx": int(upd_idx),
                 "duration_sec": duration_sec,
-                **_build_risk_event_metrics(**off_metrics),
+                **_build_risk_event_metrics_from_kwargs(off_metrics),
                 "end_reason": str(transition_reason),
             }
             events.append(ev)
@@ -1761,7 +1950,7 @@ def emit_events(
                 status_cb(
                     f"[ALERT] RISK_OFF | upd={upd_idx:03d} | dev={key[0]} | ch={key[1]} | "
                     f"t_end={t1:.3f} | score={float(metrics_kwargs.get('score', np.nan)):.3e} | "
-                    f"S={float(metrics_kwargs.get('evidence', st.evidence)):+.3f} | reason={metrics_kwargs.get('reason', '')}"
+                    f"S={float(metrics_kwargs.get('evidence', st_signal.evidence)):+.3f} | reason={metrics_kwargs.get('reason', '')}"
                 )
             if np.isfinite(start_t):
                 if status_cb is not None:
@@ -1790,26 +1979,12 @@ def emit_events(
                     )
             if on_event is not None:
                 on_event(ev)
-        st.last_off_t = float(t1)
-        st.active_start_t = None
-        st.active_start_update_idx = None
-        st.on_candidate_streak = 0
-        st.on_short_votes.clear()
-        st.on_soft_votes.clear()
-        st.warmup_on_votes.clear()
-        st.warmup_on_start_t = None
-        st.warmup_on_start_update_idx = None
-        st.prev_long_ratio_on = float("nan")
-        st.on_support_ema = 0.0
-        st.long_off_votes.clear()
-        # Keep long-baseline store, but reset event-memory histories on OFF confirm.
-        st.long_score_hist.clear()
-        st.long_off_recent_hist.clear()
-        st.long_ready_streak = 0
-        st.off_candidate_start_t = None
-        st.off_candidate_start_update_idx = None
-        st.on_event_emitted = False
-        st.phase = PHASE_OFF
+        _reset_after_off_confirm(
+            st_signal=st_signal,
+            st_votes=st_votes,
+            st_cache=st_cache,
+            t1=float(t1),
+        )
 
     return int(raw_risk_interval_count), int(suppressed_interval_count), int(next_interval_id)
 
@@ -1818,6 +1993,7 @@ def emit_events(
 __all__ = [
     "_finite_or_nan",
     "_build_risk_event_metrics",
+    "_build_risk_event_metrics_from_kwargs",
     "_emit_or_stitch_interval",
     "_extract_features",
     "_update_baseline_and_long_stats",
@@ -1828,3 +2004,4 @@ __all__ = [
     "step_fsm",
     "emit_events",
 ]
+

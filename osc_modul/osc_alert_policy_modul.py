@@ -265,19 +265,45 @@ def _pick_modal_summary(
                 "modal_status": "none",
                 "dominant_freq_hz": float("nan"),
                 "dominant_damping_per_sec": float("nan"),
+                "dominant_signed_rate_per_sec": float("nan"),
                 "dominant_damping_ratio": float("nan"),
                 "modal_fit_r2": float("nan"),
                 "modal_mode_count": 0,
                 "modal_signal_std": float("nan"),
             }
-        f = _first_finite(rec.get(f"{prefix}_dominant_freq_hz", np.nan))
-        dps = _first_finite(rec.get(f"{prefix}_dominant_damping_per_sec", np.nan))
-        drz = _first_finite(rec.get(f"{prefix}_dominant_damping_ratio", np.nan), _damping_ratio_from(f, dps))
+        if prefix == "mp":
+            f = _first_finite(
+                rec.get("mp_primary_mode_freq_hz", np.nan),
+                rec.get("mp_dominant_freq_hz", np.nan),
+            )
+            signed_rate = _first_finite(
+                rec.get("mp_primary_mode_signed_rate_per_sec", np.nan),
+                rec.get("mp_primary_mode_rate_per_sec", np.nan),
+                rec.get("mp_dominant_damping_per_sec", np.nan),
+            )
+            dps = _first_finite(
+                rec.get("mp_dominant_damping_per_sec", np.nan),
+                (abs(float(signed_rate)) if np.isfinite(signed_rate) else np.nan),
+            )
+            drz = _first_finite(
+                rec.get("mp_dominant_damping_ratio", np.nan),
+                _damping_ratio_from(f, abs(float(signed_rate)) if np.isfinite(signed_rate) else np.nan),
+                _damping_ratio_from(f, dps),
+            )
+        else:
+            f = _first_finite(rec.get(f"{prefix}_dominant_freq_hz", np.nan))
+            dps = _first_finite(rec.get(f"{prefix}_dominant_damping_per_sec", np.nan))
+            signed_rate = float(dps)
+            drz = _first_finite(
+                rec.get(f"{prefix}_dominant_damping_ratio", np.nan),
+                _damping_ratio_from(f, dps),
+            )
         return {
             "modal_source": str(prefix),
             "modal_status": str(rec.get(f"{prefix}_status", "")),
             "dominant_freq_hz": float(f),
             "dominant_damping_per_sec": float(dps),
+            "dominant_signed_rate_per_sec": float(signed_rate),
             "dominant_damping_ratio": float(drz),
             "modal_fit_r2": _first_finite(rec.get(f"{prefix}_fit_r2", np.nan)),
             "modal_mode_count": int(rec.get(f"{prefix}_mode_count", 0)),
@@ -422,9 +448,24 @@ def evaluate_operator_alerts(
             energy_value=float(energy_value),
         )
         duration_sec = _as_float(interval_ev.get("duration_sec", np.nan))
+        dominant_signed_rate_per_sec = _as_float(
+            modal.get("dominant_signed_rate_per_sec", np.nan)
+        )
+        dominant_damping_per_sec = _as_float(modal.get("dominant_damping_per_sec", np.nan))
         damping_ratio = _first_finite(
             modal.get("dominant_damping_ratio", np.nan),
-            _damping_ratio_from(modal.get("dominant_freq_hz", np.nan), modal.get("dominant_damping_per_sec", np.nan)),
+            _damping_ratio_from(
+                modal.get("dominant_freq_hz", np.nan),
+                (
+                    abs(float(dominant_signed_rate_per_sec))
+                    if np.isfinite(dominant_signed_rate_per_sec)
+                    else dominant_damping_per_sec
+                ),
+            ),
+            _damping_ratio_from(
+                modal.get("dominant_freq_hz", np.nan),
+                dominant_damping_per_sec,
+            ),
         )
         fit_r2 = _as_float(modal.get("modal_fit_r2", np.nan))
         mode_count = int(modal.get("modal_mode_count", 0))
@@ -478,6 +519,8 @@ def evaluate_operator_alerts(
                 "reasons": reasons,
                 "review_required": int(review_required),
                 "freq_hz": float(freq_hz),
+                "dominant_signed_rate_per_sec": float(dominant_signed_rate_per_sec),
+                "dominant_damping_per_sec": float(dominant_damping_per_sec),
                 "damping_ratio": float(damping_ratio),
                 "modal_reliable": int(modal_reliable),
                 "modal_source": str(modal.get("modal_source", "none")),
@@ -565,6 +608,8 @@ def evaluate_operator_alerts(
                 "band_freq_low_hz": float(band.freq_low_hz),
                 "band_freq_high_hz": float(band.freq_high_hz),
                 "dominant_freq_hz": float(cand["freq_hz"]),
+                "dominant_signed_rate_per_sec": float(cand["dominant_signed_rate_per_sec"]),
+                "dominant_damping_per_sec": float(cand["dominant_damping_per_sec"]),
                 "dominant_damping_ratio": float(cand["damping_ratio"]),
                 "modal_source": str(cand["modal_source"]),
                 "modal_reliable": int(cand["modal_reliable"]),

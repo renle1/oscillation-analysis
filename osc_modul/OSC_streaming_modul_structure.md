@@ -39,6 +39,20 @@ py -3.12 -m pip install -U numpy pandas
 - `osc_modul/osc_runtime_modul.py`
   - Runtime orchestration (main FSM + burst sidecar)
 
+## Semantic Contract (Official API)
+
+- Official grouped access paths:
+  - `tick.signal`, `tick.quality`, `tick.vote`
+  - `st.signal`, `st.votes`, `st.cache`
+- Official detector meaning names in new code:
+  - `gate_*`, `feature_*`, `state_*`
+- Compatibility-only layers (do not add new usage):
+  - Flat forwarding on `TickFeatures` / `ChannelStreamState`
+  - Legacy export wrapper `_build_risk_event_metrics(...)`
+- Producer/storage boundary:
+  - Semantic quality snapshots are lowered into legacy storage only through
+    `_build_tick_quality_state_from_snapshot()`.
+
 ## Input Modes
 
 - `replay_csv`
@@ -57,6 +71,12 @@ Help:
 
 ```powershell
 py -3.12 -m osc_modul.osc_runtime_modul --help
+```
+
+Semantic boundary guard:
+
+```powershell
+& "C:\Users\danB\AppData\Local\Programs\Python\Python312\python.exe" tools\check_semantic_boundaries.py
 ```
 
 Replay test:

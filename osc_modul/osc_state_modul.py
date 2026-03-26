@@ -1,4 +1,12 @@
-"""State/phase types for modular streaming detector."""
+"""State/phase types for modular streaming detector.
+
+Canonical API contract for new code:
+- Channel state access: ``st.signal`` / ``st.votes`` / ``st.cache``
+- Tick feature access: ``tick.signal`` / ``tick.quality`` / ``tick.vote``
+- Tick-quality reads: semantic alias names (``gate_*`` / ``feature_*`` / ``state_*``)
+
+Legacy flat forwarding and legacy storage names remain for compatibility only.
+"""
 
 from __future__ import annotations
 
@@ -158,7 +166,12 @@ class CacheState:
 
 @dataclass
 class ChannelStreamState:
-    """Per-channel stream state grouped into signal/vote/cache blocks."""
+    """Per-channel stream state grouped into signal/vote/cache blocks.
+
+    Prefer explicit section access (`st.signal`, `st.votes`, `st.cache`).
+    Flat attribute forwarding is retained for legacy compatibility only.
+    New runtime code must not use forwarded flat fields.
+    """
 
     signal: SignalState = field(default_factory=SignalState)
     votes: VoteState = field(default_factory=VoteState)
@@ -219,6 +232,7 @@ class ChannelStreamState:
     }
 
     def __getattr__(self, name: str):
+        # Legacy compatibility path only: prefer explicit section access in new code.
         if name in self._SIGNAL_FIELDS:
             return getattr(self.signal, name)
         if name in self._VOTE_FIELDS:
@@ -231,6 +245,7 @@ class ChannelStreamState:
         raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
 
     def __setattr__(self, name: str, value) -> None:
+        # Legacy compatibility path only: prefer explicit section access in new code.
         if name in {"signal", "votes", "cache"}:
             super().__setattr__(name, value)
             return
@@ -358,7 +373,11 @@ class TickSignalState:
 
 @dataclass
 class TickQualityState:
-    """Per-tick quality/confidence/evidence bundle."""
+    """Per-tick quality/confidence/evidence bundle.
+
+    Prefer alias properties (`gate_*`, `feature_*`, `state_*`) in new code.
+    Flat storage fields are legacy-compatibility only and should not be read directly.
+    """
 
     acf_peak: float
     acf_period_sec: float
@@ -539,7 +558,12 @@ class TickVoteState:
 
 @dataclass
 class TickFeatures:
-    """Per-tick features grouped by signal/quality/vote layers."""
+    """Per-tick features grouped by signal/quality/vote layers.
+
+    Prefer explicit layer access (`tick.signal`, `tick.quality`, `tick.vote`).
+    Flat forwarding remains for legacy compatibility only.
+    New runtime code must not use forwarded flat fields.
+    """
 
     signal: TickSignalState
     quality: TickQualityState
@@ -550,6 +574,7 @@ class TickFeatures:
     _VOTE_FIELDS: ClassVar[set[str]] = set(TickVoteState.__dataclass_fields__.keys())
 
     def __getattr__(self, name: str):
+        # Legacy compatibility path only: prefer explicit layer access in new code.
         if name in self._SIGNAL_FIELDS:
             return getattr(self.signal, name)
         if name in self._QUALITY_FIELDS:
@@ -559,6 +584,7 @@ class TickFeatures:
         raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
 
     def __setattr__(self, name: str, value) -> None:
+        # Legacy compatibility path only: prefer explicit layer access in new code.
         if name in {"signal", "quality", "vote"}:
             super().__setattr__(name, value)
             return
