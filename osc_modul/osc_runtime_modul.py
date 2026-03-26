@@ -326,51 +326,58 @@ def _build_tick_metrics_kwargs(
 ) -> dict[str, object]:
     """Build event-metrics kwargs from one tick without local field fan-out."""
 
+    tick_signal = tick.signal
+    tick_quality = tick.quality
+    tick_vote = tick.vote
+    st_signal = st.signal
+    st_votes = st.votes
+    st_cache = st.cache
+
     return _build_event_metrics_kwargs(
-        score=float(tick.score),
-        confidence=float(tick.confidence),
-        confidence_raw=float(tick.confidence_raw),
-        confidence_cal=float(tick.confidence_cal),
-        cal_on_conf_thr=float(tick.cal_on_conf_thr),
-        on_support=float(tick.on_support),
-        on_support_ema=float(tick.on_support_ema),
-        on_soft_votes_sum=int(tick.on_soft_vote_sum),
-        on_soft_votes_n=int(len(st.on_soft_votes)),
-        c_acf=float(tick.c_acf),
-        c_spec=float(tick.c_spec),
-        c_env=float(tick.c_env),
-        c_fft=float(tick.c_fft),
-        c_freq_agree=float(tick.c_freq_agree),
-        f_welch=float(tick.f_welch),
-        f_zc=float(tick.f_zc),
-        f_fft=float(tick.f_fft),
-        A_tail=float(tick.A_tail),
-        D_tail=float(tick.D_tail),
-        rms_decay=float(tick.rms_decay),
-        rms_decay_r2=float(tick.rms_decay_r2),
-        rms_decay_n=int(tick.rms_decay_n),
-        rms_decay_on_ok=int(tick.rms_decay_on_ok),
-        rms_decay_off_hint=int(tick.rms_decay_off_hint),
-        rms_decay_event=float(tick.rms_decay_event),
-        rms_decay_event_r2=float(tick.rms_decay_event_r2),
-        rms_decay_event_n=int(tick.rms_decay_event_n),
-        rms_decay_event_win_sec=float(tick.rms_decay_event_win_sec),
-        reason=str(tick.reason),
+        score=float(tick_signal.score),
+        confidence=float(tick_quality.confidence),
+        confidence_raw=float(tick_quality.confidence_raw),
+        confidence_cal=float(tick_quality.confidence_cal),
+        cal_on_conf_thr=float(tick_quality.gate_calibration_confidence_threshold),
+        on_support=float(tick_quality.feature_support_score),
+        on_support_ema=float(tick_quality.feature_support_ema),
+        on_soft_votes_sum=int(tick_vote.gate_soft_entry_vote_sum),
+        on_soft_votes_n=int(len(st_votes.on_soft_votes)),
+        c_acf=float(tick_quality.c_acf),
+        c_spec=float(tick_quality.c_spec),
+        c_env=float(tick_quality.c_env),
+        c_fft=float(tick_quality.c_fft),
+        c_freq_agree=float(tick_quality.c_freq_agree),
+        f_welch=float(tick_quality.f_welch),
+        f_zc=float(tick_quality.f_zc),
+        f_fft=float(tick_quality.f_fft),
+        A_tail=float(tick_signal.A_tail),
+        D_tail=float(tick_signal.D_tail),
+        rms_decay=float(tick_quality.rms_decay),
+        rms_decay_r2=float(tick_quality.rms_decay_r2),
+        rms_decay_n=int(tick_quality.rms_decay_n),
+        rms_decay_on_ok=int(tick_quality.rms_decay_on_ok),
+        rms_decay_off_hint=int(tick_quality.rms_decay_off_hint),
+        rms_decay_event=float(tick_quality.rms_decay_event),
+        rms_decay_event_r2=float(tick_quality.rms_decay_event_r2),
+        rms_decay_event_n=int(tick_quality.rms_decay_event_n),
+        rms_decay_event_win_sec=float(tick_quality.rms_decay_event_win_sec),
+        reason=str(tick_signal.reason),
         transition_reason=str(transition_reason),
-        evidence=float(st.evidence),
-        long_ratio_on=float(tick.long_ratio_on),
-        long_ratio_off=float(tick.long_ratio_off),
-        long_ratio_off_recent=float(tick.long_ratio_off_recent),
-        long_off_n_recent=int(tick.long_off_n_recent),
-        long_off_votes_sum=int(st.long_off_votes.sum),
-        long_off_votes_n=int(len(st.long_off_votes)),
-        acf_peak=float(tick.acf_peak),
-        acf_period_sec=float(tick.acf_period_sec),
-        acf_lag_steps=int(tick.acf_lag_steps),
-        acf_n=int(tick.acf_n),
-        long_zmax=float(tick.long_zmax),
-        long_n=int(tick.long_n),
-        baseline_n=int(len(st.long_baseline_hist)),
+        evidence=float(st_signal.evidence),
+        long_ratio_on=float(tick_signal.long_ratio_on),
+        long_ratio_off=float(tick_signal.long_ratio_off),
+        long_ratio_off_recent=float(tick_signal.long_ratio_off_recent),
+        long_off_n_recent=int(tick_signal.long_off_n_recent),
+        long_off_votes_sum=int(st_votes.long_off_votes.sum),
+        long_off_votes_n=int(len(st_votes.long_off_votes)),
+        acf_peak=float(tick_quality.acf_peak),
+        acf_period_sec=float(tick_quality.acf_period_sec),
+        acf_lag_steps=int(tick_quality.acf_lag_steps),
+        acf_n=int(tick_quality.acf_n),
+        long_zmax=float(tick_signal.long_zmax),
+        long_n=int(tick_signal.long_n),
+        baseline_n=int(len(st_cache.long_baseline_hist)),
     )
 
 
@@ -384,6 +391,9 @@ def _build_cached_metrics_kwargs(
     """Build event metrics from cached quality when no current tick exists."""
 
     q = quality if quality is not None else QualityCacheSnapshot()
+    st_signal = st.signal
+    st_votes = st.votes
+    st_cache = st.cache
     return _build_event_metrics_kwargs(
         score=float("nan"),
         confidence=float(q.confidence),
@@ -391,9 +401,9 @@ def _build_cached_metrics_kwargs(
         confidence_cal=float(q.confidence_cal),
         cal_on_conf_thr=float("nan"),
         on_support=float("nan"),
-        on_support_ema=float(st.on_support_ema),
-        on_soft_votes_sum=int(st.on_soft_votes.sum),
-        on_soft_votes_n=int(len(st.on_soft_votes)),
+        on_support_ema=float(st_signal.on_support_ema),
+        on_soft_votes_sum=int(st_votes.on_soft_votes.sum),
+        on_soft_votes_n=int(len(st_votes.on_soft_votes)),
         c_acf=float(q.c_acf),
         c_spec=float(q.c_spec),
         c_env=float(q.c_env),
@@ -415,20 +425,20 @@ def _build_cached_metrics_kwargs(
         rms_decay_event_win_sec=float(q.rms_decay_event_win_sec),
         reason=str(reason),
         transition_reason=str(transition_reason),
-        evidence=float(st.evidence),
+        evidence=float(st_signal.evidence),
         long_ratio_on=float("nan"),
         long_ratio_off=float("nan"),
         long_ratio_off_recent=float("nan"),
         long_off_n_recent=0,
-        long_off_votes_sum=int(st.long_off_votes.sum),
-        long_off_votes_n=int(len(st.long_off_votes)),
+        long_off_votes_sum=int(st_votes.long_off_votes.sum),
+        long_off_votes_n=int(len(st_votes.long_off_votes)),
         acf_peak=float(q.acf_peak),
         acf_period_sec=float(q.acf_period_sec),
         acf_lag_steps=int(q.acf_lag_steps),
         acf_n=int(q.acf_n),
         long_zmax=float("nan"),
-        long_n=int(len(st.long_score_hist)),
-        baseline_n=int(len(st.long_baseline_hist)),
+        long_n=int(len(st_cache.long_score_hist)),
+        baseline_n=int(len(st_cache.long_baseline_hist)),
     )
 
 
@@ -780,11 +790,12 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
             if st is None:
                 st = ChannelStreamState()
                 states[key] = st
+            st_signal = st.signal
             t_f = float(t)
             v_f = float(v)
-            if st.ring and (t_f < float(st.ring[-1][0])):
-                st.ring_time_sorted = False
-            st.ring.append((t_f, v_f))
+            if st_signal.ring and (t_f < float(st_signal.ring[-1][0])):
+                st_signal.ring_time_sorted = False
+            st_signal.ring.append((t_f, v_f))
             key_samples = batch_samples_by_key.get(key)
             if key_samples is None:
                 key_samples = []
@@ -794,6 +805,9 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
 
         for key in touched_keys:
             st = states[key]
+            st_signal = st.signal
+            st_votes = st.votes
+            st_cache = st.cache
             bst = burst_states.get(key)
             if bst is None:
                 bst = BurstChannelState()
@@ -818,36 +832,39 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
                 _sync_interval_energy_capture(
                     key=key,
                     active_start_t=(
-                        float(st.active_start_t)
-                        if (st.active_start_t is not None) and np.isfinite(st.active_start_t)
+                        float(st_signal.active_start_t)
+                        if (st_signal.active_start_t is not None) and np.isfinite(st_signal.active_start_t)
                         else float("nan")
                     ),
-                    is_interval_active=bool(st.active_start_t is not None),
+                    is_interval_active=bool(st_signal.active_start_t is not None),
                     tick_samples=tick_samples,
                 )
                 mp_runtime.sync_interval_capture(
                     key=key,
                     active_start_t=(
-                        float(st.active_start_t)
-                        if (st.active_start_t is not None) and np.isfinite(st.active_start_t)
+                        float(st_signal.active_start_t)
+                        if (st_signal.active_start_t is not None) and np.isfinite(st_signal.active_start_t)
                         else float("nan")
                     ),
-                    is_interval_active=bool(st.active_start_t is not None),
+                    is_interval_active=bool(st_signal.active_start_t is not None),
                     tick_samples=tick_samples,
                 )
                 prony_runtime.sync_interval_capture(
                     key=key,
                     active_start_t=(
-                        float(st.active_start_t)
-                        if (st.active_start_t is not None) and np.isfinite(st.active_start_t)
+                        float(st_signal.active_start_t)
+                        if (st_signal.active_start_t is not None) and np.isfinite(st_signal.active_start_t)
                         else float("nan")
                     ),
-                    is_interval_active=bool(st.active_start_t is not None),
+                    is_interval_active=bool(st_signal.active_start_t is not None),
                     tick_samples=tick_samples,
                 )
                 continue
-            phase_now = str(st.phase)
-            transition_reason = str(tick.reason)
+            tick_signal = tick.signal
+            tick_quality = tick.quality
+            tick_vote = tick.vote
+            phase_now = str(st_signal.phase)
+            transition_reason = str(tick_signal.reason)
             decision = build_decision_context(
                 tick=tick,
                 st=st,
@@ -857,40 +874,40 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
             )
             gate_flags = decision
             on_entry_vote_sum = int(decision.on_entry_vote_sum)
-            warmup_cold_start_allowed = bool(not np.isfinite(st.last_off_t))
+            warmup_cold_start_allowed = bool(not np.isfinite(st_signal.last_off_t))
             warmup_handoff_active = bool(
                 bool(lg.warmup_long_enabled)
                 and bool(warmup_cold_start_allowed)
-                and bool(tick.long_ready)
-                and (int(st.long_ready_streak) <= int(lg.warmup_handoff_grace_ticks))
+                and bool(tick_quality.gate_long_baseline_ready)
+                and (int(st_signal.long_ready_streak) <= int(lg.warmup_handoff_grace_ticks))
             )
 
             phase_now, transition_reason = step_fsm(
                 st,
                 phase_now=str(phase_now),
-                t1=float(tick.t1),
+                t1=float(tick_signal.t1),
                 upd_idx=int(upd_idx),
-                reason=str(tick.reason),
-                score_reason_ok=bool(tick.score_reason_ok),
-                score=float(tick.score),
-                cut_off_cmp=float(tick.cut_off_cmp),
-                cal_on_active=bool(tick.cal_on_active),
-                on_support_ema=float(tick.on_support_ema),
+                reason=str(tick_signal.reason),
+                score_reason_ok=bool(tick_signal.score_reason_ok),
+                score=float(tick_signal.score),
+                cut_off_cmp=float(tick_signal.cut_off_cmp),
+                cal_on_active=bool(tick_quality.gate_calibration_active),
+                on_support_ema=float(tick_quality.feature_support_ema),
                 cal_on_support_hold_min=float(pq.cal_on_support_hold_min),
                 on_confirm_min_sec=float(th.on_confirm_min_sec),
                 re_on_confirm_min_sec=float(th.re_on_confirm_min_sec),
                 re_on_require_short_trigger=bool(th.re_on_require_short_trigger),
                 re_on_require_accel=bool(th.re_on_require_accel),
                 re_on_grace_sec=float(th.re_on_grace_sec),
-                on_soft_confirmed=bool(tick.on_soft_confirmed),
+                on_soft_confirmed=bool(tick_vote.gate_soft_entry_confirmed),
                 cal_on_support_confirm_min=float(pq.cal_on_support_confirm_min),
                 off_hold_down_sec=float(th.off_hold_down_sec),
-                short_trigger=bool(tick.short_trigger),
-                short_high=bool(tick.short_high),
-                collapse_ok=bool(tick.collapse_ok),
-                off_vote_core=bool(tick.off_vote_core),
-                long_off_confirmed=bool(tick.long_off_confirmed),
-                force_off_now=bool(tick.force_off_now),
+                short_trigger=bool(tick_signal.short_trigger),
+                short_high=bool(tick_signal.short_high),
+                collapse_ok=bool(tick_signal.collapse_ok),
+                off_vote_core=bool(tick_signal.off_vote_core),
+                long_off_confirmed=bool(tick_signal.long_off_confirmed),
+                force_off_now=bool(tick_signal.force_off_now),
                 on_consecutive_required=int(th.on_consecutive_required),
                 off_confirm_min_sec=float(th.off_confirm_min_sec),
                 gate_flags=gate_flags,
@@ -899,43 +916,43 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
             _sync_interval_energy_capture(
                 key=key,
                 active_start_t=(
-                    float(st.active_start_t)
-                    if (st.active_start_t is not None) and np.isfinite(st.active_start_t)
+                    float(st_signal.active_start_t)
+                    if (st_signal.active_start_t is not None) and np.isfinite(st_signal.active_start_t)
                     else float("nan")
                 ),
-                is_interval_active=bool(st.active_start_t is not None),
+                is_interval_active=bool(st_signal.active_start_t is not None),
                 tick_samples=tick_samples,
             )
             mp_runtime.sync_interval_capture(
                 key=key,
                 active_start_t=(
-                    float(st.active_start_t)
-                    if (st.active_start_t is not None) and np.isfinite(st.active_start_t)
+                    float(st_signal.active_start_t)
+                    if (st_signal.active_start_t is not None) and np.isfinite(st_signal.active_start_t)
                     else float("nan")
                 ),
-                is_interval_active=bool(st.active_start_t is not None),
+                is_interval_active=bool(st_signal.active_start_t is not None),
                 tick_samples=tick_samples,
             )
             prony_runtime.sync_interval_capture(
                 key=key,
                 active_start_t=(
-                    float(st.active_start_t)
-                    if (st.active_start_t is not None) and np.isfinite(st.active_start_t)
+                    float(st_signal.active_start_t)
+                    if (st_signal.active_start_t is not None) and np.isfinite(st_signal.active_start_t)
                     else float("nan")
                 ),
-                is_interval_active=bool(st.active_start_t is not None),
+                is_interval_active=bool(st_signal.active_start_t is not None),
                 tick_samples=tick_samples,
             )
 
             risk_now = bool(_is_risk_active_phase(phase_now))
 
             if print_tick:
-                off_vote_str = f"{int(st.long_off_votes.sum)}/{len(st.long_off_votes)}"
-                warmup_vote_str = f"{int(tick.warmup_vote_sum)}/{len(st.warmup_on_votes)}"
-                long_gate_mode = ("W" if bool(tick.warmup_mode) else ("H" if warmup_handoff_active else "L"))
+                off_vote_str = f"{int(st_votes.long_off_votes.sum)}/{len(st_votes.long_off_votes)}"
+                warmup_vote_str = f"{int(tick_vote.gate_warmup_entry_vote_sum)}/{len(st_votes.warmup_on_votes)}"
+                long_gate_mode = ("W" if bool(tick_quality.state_cold_start_warmup_active) else ("H" if warmup_handoff_active else "L"))
                 off_age_sec = (
-                    float(tick.t1 - float(st.last_off_t))
-                    if np.isfinite(st.last_off_t)
+                    float(tick_signal.t1 - float(st_signal.last_off_t))
+                    if np.isfinite(st_signal.last_off_t)
                     else float("nan")
                 )
                 post_off_rearm_active = bool(
@@ -945,25 +962,25 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
                 )
                 status(
                     f"[TICK] upd={upd_idx:03d} | dev={key[0]} | ch={key[1]} | "
-                    f"t_end={float(tick.t1):.3f} | score={float(tick.score):.3e} | e={float(tick.e_t):+.3f} | S={float(st.evidence):+.3f} | "
-                    f"phase={phase_now} | on_votes={st.on_candidate_streak}/{len(st.on_short_votes)} | "
-                    f"damped_streak={st.damped_streak} | coll_streak={st.periodicity_collapse_streak} | "
-                    f"Lon={float(tick.long_ratio_on):.2f} | Loff={float(tick.long_ratio_off):.2f} | LoffR={float(tick.long_ratio_off_recent):.2f} | "
-                    f"Conf={float(tick.confidence):.2f}[raw={float(tick.confidence_raw):.2f},cal={float(tick.confidence_cal):.2f}]"
-                    f"(acf={float(tick.c_acf):.2f},spec={float(tick.c_spec):.2f},env={float(tick.c_env):.2f},fft={float(tick.c_fft):.2f},xv={float(tick.c_freq_agree):.2f}) | "
-                    f"f={float(tick.f_welch):.2f}/{float(tick.f_zc):.2f}/{float(tick.f_fft):.2f}Hz | ACF={float(tick.acf_peak):.2f}@{float(tick.acf_period_sec):.1f}s | "
-                    f"RMSd={float(tick.rms_decay):+.3f}[n={int(tick.rms_decay_n)},r2={float(tick.rms_decay_r2):.2f}] | "
-                    f"CALthr={float(tick.cal_on_conf_thr):.2f} | Soft={float(tick.on_support):.2f}/{float(tick.on_support_ema):.2f} | "
-                    f"SV={int(tick.on_soft_vote_sum)}/{len(st.on_soft_votes)} | Wv={warmup_vote_str}({int(bool(tick.warmup_on_confirmed))}) | "
-                    f"CUT[on={float(tick.cut_on_cmp):.2e},off={float(tick.cut_off_cmp):.2e}] | "
+                    f"t_end={float(tick_signal.t1):.3f} | score={float(tick_signal.score):.3e} | e={float(tick_quality.e_t):+.3f} | S={float(st_signal.evidence):+.3f} | "
+                    f"phase={phase_now} | on_votes={st_signal.on_candidate_streak}/{len(st_votes.on_short_votes)} | "
+                    f"damped_streak={st_signal.damped_streak} | coll_streak={st_signal.periodicity_collapse_streak} | "
+                    f"Lon={float(tick_signal.long_ratio_on):.2f} | Loff={float(tick_signal.long_ratio_off):.2f} | LoffR={float(tick_signal.long_ratio_off_recent):.2f} | "
+                    f"Conf={float(tick_quality.confidence):.2f}[raw={float(tick_quality.confidence_raw):.2f},cal={float(tick_quality.confidence_cal):.2f}]"
+                    f"(acf={float(tick_quality.c_acf):.2f},spec={float(tick_quality.c_spec):.2f},env={float(tick_quality.c_env):.2f},fft={float(tick_quality.c_fft):.2f},xv={float(tick_quality.c_freq_agree):.2f}) | "
+                    f"f={float(tick_quality.f_welch):.2f}/{float(tick_quality.f_zc):.2f}/{float(tick_quality.f_fft):.2f}Hz | ACF={float(tick_quality.acf_peak):.2f}@{float(tick_quality.acf_period_sec):.1f}s | "
+                    f"RMSd={float(tick_quality.rms_decay):+.3f}[n={int(tick_quality.rms_decay_n)},r2={float(tick_quality.rms_decay_r2):.2f}] | "
+                    f"CALthr={float(tick_quality.gate_calibration_confidence_threshold):.2f} | Soft={float(tick_quality.feature_support_score):.2f}/{float(tick_quality.feature_support_ema):.2f} | "
+                    f"SV={int(tick_vote.gate_soft_entry_vote_sum)}/{len(st_votes.on_soft_votes)} | Wv={warmup_vote_str}({int(bool(tick_vote.gate_warmup_entry_confirmed))}) | "
+                    f"CUT[on={float(tick_signal.cut_on_cmp):.2e},off={float(tick_signal.cut_off_cmp):.2e}] | "
                     f"Lg={long_gate_mode}:{int(gate_flags.on_long_gate_ok)} | rearm={int(post_off_rearm_active)} | off_age_sec={float(off_age_sec):.3f} | "
                     f"Ev={int(on_entry_vote_sum)}/4 | Lv={off_vote_str} | "
                     f"G[ac={int(gate_flags.accel_ok)},cf={int(gate_flags.on_conf_ok)},su={int(gate_flags.on_support_ok)},"
                     f"lg={int(gate_flags.on_long_gate_ok)},lr={int(gate_flags.long_ready)},ra={int(gate_flags.re_on_active)},"
                     f"rs={int(gate_flags.re_on_short_ok)},rx={int(gate_flags.re_on_accel_ok)},"
-                    f"ov={int(bool(tick.off_vote_core))},oc={int(bool(tick.long_off_confirmed))},fo={int(bool(tick.force_off_now))}] | "
-                    f"dS={float(tick.delta_s_log):+.2f} | dE={float(tick.delta_e):+.2f} | Lzmax={float(tick.long_zmax):.2f} | "
-                    f"Ln={int(tick.long_n)} | Bn={len(st.long_baseline_hist)} | reason={tick.reason} | risk={'ON' if risk_now else 'OFF'}"
+                    f"ov={int(bool(tick_signal.off_vote_core))},oc={int(bool(tick_signal.long_off_confirmed))},fo={int(bool(tick_signal.force_off_now))}] | "
+                    f"dS={float(tick_quality.feature_score_log_delta):+.2f} | dE={float(tick_quality.feature_evidence_delta):+.2f} | Lzmax={float(tick_signal.long_zmax):.2f} | "
+                    f"Ln={int(tick_signal.long_n)} | Bn={len(st_cache.long_baseline_hist)} | reason={tick_signal.reason} | risk={'ON' if risk_now else 'OFF'}"
                 )
 
             metrics_kwargs = _build_tick_metrics_kwargs(
@@ -977,7 +994,7 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
                 st=st,
                 key=key,
                 upd_idx=int(upd_idx),
-                t1=float(tick.t1),
+                t1=float(tick_signal.t1),
                 risk_now=bool(risk_now),
                 transition_reason=str(transition_reason),
                 min_interval_sec_for_alert=float(s.min_interval_sec_for_alert),
@@ -1015,7 +1032,7 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
                     st=bst,
                     key=key,
                     upd_idx=int(upd_idx),
-                    t1=float(tick.t1),
+                    t1=float(tick_signal.t1),
                     phase_now=str(burst_phase_now),
                     transition_reason=str(burst_transition_reason),
                     feat=burst_feat,
@@ -1025,28 +1042,30 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
                     merge_gap_sec=float(bt.burst_merge_gap_sec),
                     status_cb=status,
                 )
-                bst.phase = str(burst_phase_now) if str(burst_phase_now) != BURST_PHASE_OFF else BURST_PHASE_OFF
+                bst.signal.phase = str(burst_phase_now) if str(burst_phase_now) != BURST_PHASE_OFF else BURST_PHASE_OFF
 
             if str(phase_now) == PHASE_OFF_CONFIRMED:
-                st.phase = PHASE_OFF
+                st_signal.phase = PHASE_OFF
             elif (not risk_now) and str(phase_now) == PHASE_OFF:
-                st.phase = PHASE_OFF
+                st_signal.phase = PHASE_OFF
             else:
-                st.phase = str(phase_now)
-            st.last_risk_on = bool(risk_now)
+                st_signal.phase = str(phase_now)
+            st_signal.last_risk_on = bool(risk_now)
 
         if realtime_sleep and (not bool(source_controls_timing)):
             time.sleep(float(update_sec))
 
     for key, st in states.items():
-        if (not st.last_risk_on) or (not st.ring):
+        st_signal = st.signal
+        st_cache = st.cache
+        if (not st_signal.last_risk_on) or (not st_signal.ring):
             continue
-        end_t = float(st.ring[-1][0])
-        start_t = float(st.active_start_t) if st.active_start_t is not None else float("nan")
-        start_idx = int(st.active_start_update_idx) if st.active_start_update_idx is not None else -1
+        end_t = float(st_signal.ring[-1][0])
+        start_t = float(st_signal.active_start_t) if st_signal.active_start_t is not None else float("nan")
+        start_idx = int(st_signal.active_start_update_idx) if st_signal.active_start_update_idx is not None else -1
         duration_sec = float(end_t - start_t) if np.isfinite(start_t) else float("nan")
         raw_risk_interval_count += 1
-        q = st.last_quality if isinstance(st.last_quality, QualityCacheSnapshot) else None
+        q = st_cache.last_quality if isinstance(st_cache.last_quality, QualityCacheSnapshot) else None
         rms_decay_event_win_sec = float(q.rms_decay_event_win_sec) if q is not None else float("nan")
         if np.isfinite(duration_sec) and (duration_sec < float(min_interval_sec_for_alert)):
             suppressed_interval_count += 1
@@ -1056,7 +1075,7 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
                 f"duration={duration_sec:.3f}s < min={float(min_interval_sec_for_alert):.3f}s"
             )
             continue
-        if not st.on_event_emitted and np.isfinite(start_t):
+        if not st_signal.on_event_emitted and np.isfinite(start_t):
             delayed_metrics = _build_cached_metrics_kwargs(
                 st=st,
                 quality=q,
@@ -1120,14 +1139,15 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
 
     if bool(bt.burst_enabled):
         for key, bst in burst_states.items():
-            if str(bst.phase) != BURST_PHASE_ACTIVE:
+            bst_signal = bst.signal
+            if str(bst_signal.phase) != BURST_PHASE_ACTIVE:
                 continue
             end_t = float("nan")
             st_main = states.get(key)
-            if isinstance(st_main, ChannelStreamState) and st_main.ring:
-                end_t = float(st_main.ring[-1][0])
-            elif bst.active_start_t is not None and np.isfinite(bst.active_start_t):
-                end_t = float(bst.active_start_t)
+            if isinstance(st_main, ChannelStreamState) and st_main.signal.ring:
+                end_t = float(st_main.signal.ring[-1][0])
+            elif bst_signal.active_start_t is not None and np.isfinite(bst_signal.active_start_t):
+                end_t = float(bst_signal.active_start_t)
             if not np.isfinite(end_t):
                 continue
             raw_burst_interval_count += 1
@@ -1143,7 +1163,7 @@ def _run_streaming_alert_demo_one_channel_cfg_impl(
                 merge_gap_sec=float(bt.burst_merge_gap_sec),
                 status_cb=status,
             )
-            bst.phase = BURST_PHASE_OFF
+            bst_signal.phase = BURST_PHASE_OFF
 
     mp_records = mp_runtime.finalize()
     if mp_records:

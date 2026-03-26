@@ -398,6 +398,102 @@ class TickQualityState:
     on_support: float
     on_support_ema: float
 
+    @property
+    def gate_confidence_used_now(self) -> float:
+        return float(self.conf_now)
+
+    @gate_confidence_used_now.setter
+    def gate_confidence_used_now(self, value: float) -> None:
+        self.conf_now = float(value)
+
+    @property
+    def gate_confidence_raw_now(self) -> float:
+        return float(self.raw_now)
+
+    @gate_confidence_raw_now.setter
+    def gate_confidence_raw_now(self, value: float) -> None:
+        self.raw_now = float(value)
+
+    @property
+    def gate_long_baseline_ready(self) -> bool:
+        return bool(self.long_ready)
+
+    @gate_long_baseline_ready.setter
+    def gate_long_baseline_ready(self, value: bool) -> None:
+        self.long_ready = bool(value)
+
+    @property
+    def state_cold_start_warmup_active(self) -> bool:
+        return bool(self.warmup_mode)
+
+    @state_cold_start_warmup_active.setter
+    def state_cold_start_warmup_active(self, value: bool) -> None:
+        self.warmup_mode = bool(value)
+
+    @property
+    def gate_onset_acceleration_ok(self) -> bool:
+        return bool(self.accel_ok)
+
+    @gate_onset_acceleration_ok.setter
+    def gate_onset_acceleration_ok(self, value: bool) -> None:
+        self.accel_ok = bool(value)
+
+    @property
+    def gate_calibration_enabled(self) -> bool:
+        return bool(self.use_cal_gate)
+
+    @gate_calibration_enabled.setter
+    def gate_calibration_enabled(self, value: bool) -> None:
+        self.use_cal_gate = bool(value)
+
+    @property
+    def gate_calibration_active(self) -> bool:
+        return bool(self.cal_on_active)
+
+    @gate_calibration_active.setter
+    def gate_calibration_active(self, value: bool) -> None:
+        self.cal_on_active = bool(value)
+
+    @property
+    def gate_calibration_confidence_threshold(self) -> float:
+        return float(self.cal_on_conf_thr)
+
+    @gate_calibration_confidence_threshold.setter
+    def gate_calibration_confidence_threshold(self, value: float) -> None:
+        self.cal_on_conf_thr = float(value)
+
+    @property
+    def feature_support_score(self) -> float:
+        return float(self.on_support)
+
+    @feature_support_score.setter
+    def feature_support_score(self, value: float) -> None:
+        self.on_support = float(value)
+
+    @property
+    def feature_support_ema(self) -> float:
+        return float(self.on_support_ema)
+
+    @feature_support_ema.setter
+    def feature_support_ema(self, value: float) -> None:
+        self.on_support_ema = float(value)
+
+    @property
+    def feature_score_log_delta(self) -> float:
+        return float(self.delta_s_log)
+
+    @feature_score_log_delta.setter
+    def feature_score_log_delta(self, value: float) -> None:
+        self.delta_s_log = float(value)
+
+    @property
+    def feature_evidence_delta(self) -> float:
+        return float(self.delta_e)
+
+    @feature_evidence_delta.setter
+    def feature_evidence_delta(self, value: float) -> None:
+        self.delta_e = float(value)
+
 
 @dataclass
 class TickVoteState:
@@ -407,6 +503,38 @@ class TickVoteState:
     warmup_on_confirmed: bool
     on_soft_vote_sum: int
     on_soft_confirmed: bool
+
+    @property
+    def gate_warmup_entry_confirmed(self) -> bool:
+        return bool(self.warmup_on_confirmed)
+
+    @gate_warmup_entry_confirmed.setter
+    def gate_warmup_entry_confirmed(self, value: bool) -> None:
+        self.warmup_on_confirmed = bool(value)
+
+    @property
+    def gate_warmup_entry_vote_sum(self) -> int:
+        return int(self.warmup_vote_sum)
+
+    @gate_warmup_entry_vote_sum.setter
+    def gate_warmup_entry_vote_sum(self, value: int) -> None:
+        self.warmup_vote_sum = int(value)
+
+    @property
+    def gate_soft_entry_confirmed(self) -> bool:
+        return bool(self.on_soft_confirmed)
+
+    @gate_soft_entry_confirmed.setter
+    def gate_soft_entry_confirmed(self, value: bool) -> None:
+        self.on_soft_confirmed = bool(value)
+
+    @property
+    def gate_soft_entry_vote_sum(self) -> int:
+        return int(self.on_soft_vote_sum)
+
+    @gate_soft_entry_vote_sum.setter
+    def gate_soft_entry_vote_sum(self, value: int) -> None:
+        self.on_soft_vote_sum = int(value)
 
 
 @dataclass

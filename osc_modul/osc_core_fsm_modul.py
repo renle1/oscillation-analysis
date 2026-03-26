@@ -964,7 +964,7 @@ def compute_tick_features(
         return None
 
     tw0, vw0, tw, vw, t1, score, A_tail, D_tail, reason, score_reason_ok = feature_base
-    phase_now = str(st.phase)
+    phase_now = str(st.signal.phase)
     th = threshold_cfg
     lg = long_cfg
     pq = periodicity_cfg
@@ -974,10 +974,10 @@ def compute_tick_features(
     else:
         st.damped_streak = 0
 
-    pre_base_med, pre_base_scale = _robust_center_scale(st.long_baseline_hist)
+    pre_base_med, pre_base_scale = _robust_center_scale(st.cache.long_baseline_hist)
     cut_on_eff = float(cut_on)
     cut_off_eff = float(cut_off)
-    if bool(th.short_dynamic_cut_enabled) and (len(st.long_baseline_hist) >= int(th.short_dynamic_min_baseline)):
+    if bool(th.short_dynamic_cut_enabled) and (len(st.cache.long_baseline_hist) >= int(th.short_dynamic_min_baseline)):
         cut_on_dyn = _dynamic_score_cut_from_log_baseline(
             base_med=pre_base_med,
             base_scale=pre_base_scale,
@@ -1006,7 +1006,7 @@ def compute_tick_features(
     cut_on_cmp = float(max(1e-18, float(cut_on_eff) * float(damped_cut_relax)))
     cut_off_cmp = float(max(1e-18, float(cut_off_eff) * float(damped_cut_relax)))
 
-    risk_prev = bool(_is_risk_active_phase(st.phase))
+    risk_prev = bool(_is_risk_active_phase(st.signal.phase))
     short_high = bool(score_reason_ok and np.isfinite(score) and (float(score) >= float(cut_on_cmp)))
     st.on_short_votes.append(1 if short_high else 0)
     while len(st.on_short_votes) > int(th.on_short_votes_window):
@@ -1032,7 +1032,7 @@ def compute_tick_features(
         risk_prev
         or short_high
         or short_trigger
-        or (str(st.phase) != PHASE_OFF)
+        or (str(st.signal.phase) != PHASE_OFF)
     )
     rms_decay_idle_refresh_sec = max(float(update_sec), float(th.rms_decay_cache_refresh_sec))
     can_reuse_rms = bool(
@@ -1075,7 +1075,7 @@ def compute_tick_features(
     rms_decay_event_win_sec = float("nan")
     if (
         bool(th.rms_decay_event_enabled)
-        and (str(st.phase) in {PHASE_ON_CONFIRMED, PHASE_OFF_CANDIDATE})
+        and (str(st.signal.phase) in {PHASE_ON_CONFIRMED, PHASE_OFF_CANDIDATE})
         and (st.active_start_t is not None)
         and np.isfinite(st.active_start_t)
     ):
@@ -1097,7 +1097,7 @@ def compute_tick_features(
     st.last_rms_decay_event_n = int(rms_decay_event_n)
     st.last_rms_decay_event_win_sec = float(rms_decay_event_win_sec) if np.isfinite(rms_decay_event_win_sec) else float("nan")
     st.last_rms_decay_event_t_end = float(t1)
-    if str(st.phase) not in {PHASE_ON_CONFIRMED, PHASE_OFF_CANDIDATE}:
+    if str(st.signal.phase) not in {PHASE_ON_CONFIRMED, PHASE_OFF_CANDIDATE}:
         st.rms_decay_event_peak = float("nan")
     if np.isfinite(rms_decay_event):
         prev_peak = float(st.rms_decay_event_peak) if np.isfinite(st.rms_decay_event_peak) else float("nan")
@@ -1136,7 +1136,7 @@ def compute_tick_features(
         long_z_off=float(lg.long_z_off),
         baseline_post_off_cooldown_sec=float(lg.baseline_post_off_cooldown_sec),
     )
-    baseline_n_local = int(len(st.long_baseline_hist))
+    baseline_n_local = int(len(st.cache.long_baseline_hist))
     baseline_n = int(baseline_n_local)
     if bool(external_baseline_active):
         baseline_n = int(max(
@@ -1181,48 +1181,55 @@ def compute_tick_features(
         rms_decay_event_win_sec=float(rms_decay_event_win_sec),
         phase_now=str(phase_now),
     )
-    acf_peak = float(quality_snapshot.acf_peak)
-    acf_period_sec = float(quality_snapshot.acf_period_sec)
-    acf_lag_steps = int(quality_snapshot.acf_lag_steps)
-    acf_n = int(quality_snapshot.acf_n)
-    confidence = float(quality_snapshot.confidence)
-    confidence_raw = float(quality_snapshot.confidence_raw)
-    confidence_cal = float(quality_snapshot.confidence_cal)
-    c_acf = float(quality_snapshot.c_acf)
-    c_spec = float(quality_snapshot.c_spec)
-    c_env = float(quality_snapshot.c_env)
-    c_fft = float(quality_snapshot.c_fft)
-    c_freq_agree = float(quality_snapshot.c_freq_agree)
-    f_welch = float(quality_snapshot.f_welch)
-    f_zc = float(quality_snapshot.f_zc)
-    f_fft = float(quality_snapshot.f_fft)
-    rms_decay = float(quality_snapshot.rms_decay)
-    rms_decay_r2 = float(quality_snapshot.rms_decay_r2)
-    rms_decay_n = int(quality_snapshot.rms_decay_n)
-    rms_decay_on_ok = int(quality_snapshot.rms_decay_on_ok)
-    rms_decay_off_hint = int(quality_snapshot.rms_decay_off_hint)
-    rms_decay_event = float(quality_snapshot.rms_decay_event)
-    rms_decay_event_r2 = float(quality_snapshot.rms_decay_event_r2)
-    rms_decay_event_n = int(quality_snapshot.rms_decay_event_n)
-    rms_decay_event_win_sec = float(quality_snapshot.rms_decay_event_win_sec)
-    long_ready = bool(quality_snapshot.long_ready)
-    warmup_mode = bool(quality_snapshot.warmup_mode)
-    e_t = float(quality_snapshot.e_t)
-    delta_s_log = float(quality_snapshot.delta_s_log)
-    delta_e = float(quality_snapshot.delta_e)
-    accel_ok = bool(quality_snapshot.accel_ok)
-    conf_now = float(quality_snapshot.conf_now)
-    raw_now = float(quality_snapshot.raw_now)
-    use_cal_gate = bool(quality_snapshot.use_cal_gate)
-    cal_on_active = bool(quality_snapshot.cal_on_active)
-    cal_on_conf_thr = float(quality_snapshot.cal_on_conf_thr)
-    on_support = float(quality_snapshot.on_support)
-    on_support_ema = float(quality_snapshot.on_support_ema)
+    quality_state = TickQualityState(
+        acf_peak=float(quality_snapshot.acf_peak),
+        acf_period_sec=float(quality_snapshot.acf_period_sec),
+        acf_lag_steps=int(quality_snapshot.acf_lag_steps),
+        acf_n=int(quality_snapshot.acf_n),
+        confidence=float(quality_snapshot.confidence),
+        confidence_raw=float(quality_snapshot.confidence_raw),
+        confidence_cal=float(quality_snapshot.confidence_cal),
+        c_acf=float(quality_snapshot.c_acf),
+        c_spec=float(quality_snapshot.c_spec),
+        c_env=float(quality_snapshot.c_env),
+        c_fft=float(quality_snapshot.c_fft),
+        c_freq_agree=float(quality_snapshot.c_freq_agree),
+        f_welch=float(quality_snapshot.f_welch),
+        f_zc=float(quality_snapshot.f_zc),
+        f_fft=float(quality_snapshot.f_fft),
+        rms_decay=float(quality_snapshot.rms_decay),
+        rms_decay_r2=float(quality_snapshot.rms_decay_r2),
+        rms_decay_n=int(quality_snapshot.rms_decay_n),
+        rms_decay_on_ok=bool(quality_snapshot.rms_decay_on_ok),
+        rms_decay_off_hint=bool(quality_snapshot.rms_decay_off_hint),
+        rms_decay_event=float(quality_snapshot.rms_decay_event),
+        rms_decay_event_r2=float(quality_snapshot.rms_decay_event_r2),
+        rms_decay_event_n=int(quality_snapshot.rms_decay_event_n),
+        rms_decay_event_win_sec=float(quality_snapshot.rms_decay_event_win_sec),
+        long_ready=bool(quality_snapshot.long_ready),
+        warmup_mode=bool(quality_snapshot.warmup_mode),
+        e_t=float(quality_snapshot.e_t),
+        delta_s_log=float(quality_snapshot.delta_s_log),
+        delta_e=float(quality_snapshot.delta_e),
+        accel_ok=bool(quality_snapshot.accel_ok),
+        conf_now=float(quality_snapshot.conf_now),
+        raw_now=float(quality_snapshot.raw_now),
+        use_cal_gate=bool(quality_snapshot.use_cal_gate),
+        cal_on_active=bool(quality_snapshot.cal_on_active),
+        cal_on_conf_thr=float(quality_snapshot.cal_on_conf_thr),
+        on_support=float(quality_snapshot.on_support),
+        on_support_ema=float(quality_snapshot.on_support_ema),
+    )
+    gate_long_baseline_ready = bool(quality_state.gate_long_baseline_ready)
+    state_cold_start_warmup_active = bool(quality_state.state_cold_start_warmup_active)
+    gate_confidence_used_now = float(quality_state.gate_confidence_used_now)
+    gate_confidence_raw_now = float(quality_state.gate_confidence_raw_now)
+    gate_calibration_enabled = bool(quality_state.gate_calibration_enabled)
     on_soft_vote_sum = int(quality_snapshot.on_soft_vote_sum)
     on_soft_confirmed = bool(quality_snapshot.on_soft_confirmed)
 
     warmup_core = bool(
-        bool(warmup_mode)
+        bool(state_cold_start_warmup_active)
         and (int(long_n) >= int(lg.warmup_on_min_points))
         and (int(baseline_n) >= int(lg.warmup_min_baseline))
         and np.isfinite(long_zmax)
@@ -1236,7 +1243,7 @@ def compute_tick_features(
         and ((not np.isfinite(score)) or (float(score) < float(cut_off_cmp)))
     ):
         warmup_core = False
-    if (phase_now in {PHASE_OFF, PHASE_ON_CANDIDATE}) and bool(warmup_mode):
+    if (phase_now in {PHASE_OFF, PHASE_ON_CANDIDATE}) and bool(state_cold_start_warmup_active):
         st.warmup_on_votes.append(1 if warmup_core else 0)
         while len(st.warmup_on_votes) > int(lg.warmup_on_votes_window):
             st.warmup_on_votes.popleft()
@@ -1270,14 +1277,14 @@ def compute_tick_features(
         st,
         phase_now=str(phase_now),
         short_release=bool(short_release),
-        conf_now=float(conf_now),
-        raw_now=float(raw_now),
-        use_cal_gate=bool(use_cal_gate),
+        conf_now=float(gate_confidence_used_now),
+        raw_now=float(gate_confidence_raw_now),
+        use_cal_gate=bool(gate_calibration_enabled),
         confidence_off_max=float(pq.confidence_off_max),
         off_periodicity_collapse_conf_raw_max=float(th.off_periodicity_collapse_conf_raw_max),
         confidence_raw_off_max_when_cal=float(pq.confidence_raw_off_max_when_cal),
         off_periodicity_collapse_streak_required=int(th.off_periodicity_collapse_streak_required),
-        long_ready=bool(long_ready),
+        long_ready=bool(gate_long_baseline_ready),
         long_off_n_recent=int(long_off_n_recent),
         long_off_recent_min_points=int(lg.long_off_recent_min_points),
         long_ratio_off_recent=float(long_ratio_off_recent),
@@ -1319,43 +1326,43 @@ def compute_tick_features(
             force_off_now=bool(force_off_now),
         ),
         quality=TickQualityState(
-            acf_peak=float(acf_peak),
-            acf_period_sec=float(acf_period_sec),
-            acf_lag_steps=int(acf_lag_steps),
-            acf_n=int(acf_n),
-            confidence=float(confidence),
-            confidence_raw=float(confidence_raw),
-            confidence_cal=float(confidence_cal),
-            c_acf=float(c_acf),
-            c_spec=float(c_spec),
-            c_env=float(c_env),
-            c_fft=float(c_fft),
-            c_freq_agree=float(c_freq_agree),
-            f_welch=float(f_welch),
-            f_zc=float(f_zc),
-            f_fft=float(f_fft),
-            rms_decay=float(rms_decay),
-            rms_decay_r2=float(rms_decay_r2),
-            rms_decay_n=int(rms_decay_n),
-            rms_decay_on_ok=bool(rms_decay_on_ok),
-            rms_decay_off_hint=bool(rms_decay_off_hint),
-            rms_decay_event=float(rms_decay_event),
-            rms_decay_event_r2=float(rms_decay_event_r2),
-            rms_decay_event_n=int(rms_decay_event_n),
-            rms_decay_event_win_sec=float(rms_decay_event_win_sec),
-            long_ready=bool(long_ready),
-            warmup_mode=bool(warmup_mode),
-            e_t=float(e_t),
-            delta_s_log=float(delta_s_log),
-            delta_e=float(delta_e),
-            accel_ok=bool(accel_ok),
-            conf_now=float(conf_now),
-            raw_now=float(raw_now),
-            use_cal_gate=bool(use_cal_gate),
-            cal_on_active=bool(cal_on_active),
-            cal_on_conf_thr=float(cal_on_conf_thr),
-            on_support=float(on_support),
-            on_support_ema=float(on_support_ema),
+            acf_peak=float(quality_state.acf_peak),
+            acf_period_sec=float(quality_state.acf_period_sec),
+            acf_lag_steps=int(quality_state.acf_lag_steps),
+            acf_n=int(quality_state.acf_n),
+            confidence=float(quality_state.confidence),
+            confidence_raw=float(quality_state.confidence_raw),
+            confidence_cal=float(quality_state.confidence_cal),
+            c_acf=float(quality_state.c_acf),
+            c_spec=float(quality_state.c_spec),
+            c_env=float(quality_state.c_env),
+            c_fft=float(quality_state.c_fft),
+            c_freq_agree=float(quality_state.c_freq_agree),
+            f_welch=float(quality_state.f_welch),
+            f_zc=float(quality_state.f_zc),
+            f_fft=float(quality_state.f_fft),
+            rms_decay=float(quality_state.rms_decay),
+            rms_decay_r2=float(quality_state.rms_decay_r2),
+            rms_decay_n=int(quality_state.rms_decay_n),
+            rms_decay_on_ok=bool(quality_state.rms_decay_on_ok),
+            rms_decay_off_hint=bool(quality_state.rms_decay_off_hint),
+            rms_decay_event=float(quality_state.rms_decay_event),
+            rms_decay_event_r2=float(quality_state.rms_decay_event_r2),
+            rms_decay_event_n=int(quality_state.rms_decay_event_n),
+            rms_decay_event_win_sec=float(quality_state.rms_decay_event_win_sec),
+            long_ready=bool(quality_state.long_ready),
+            warmup_mode=bool(quality_state.warmup_mode),
+            e_t=float(quality_state.e_t),
+            delta_s_log=float(quality_state.delta_s_log),
+            delta_e=float(quality_state.delta_e),
+            accel_ok=bool(quality_state.accel_ok),
+            conf_now=float(quality_state.conf_now),
+            raw_now=float(quality_state.raw_now),
+            use_cal_gate=bool(quality_state.use_cal_gate),
+            cal_on_active=bool(quality_state.cal_on_active),
+            cal_on_conf_thr=float(quality_state.cal_on_conf_thr),
+            on_support=float(quality_state.on_support),
+            on_support_ema=float(quality_state.on_support_ema),
         ),
         vote=TickVoteState(
             warmup_vote_sum=int(warmup_vote_sum),
@@ -1378,54 +1385,67 @@ def build_decision_context(
     th = threshold_cfg
     lg = long_cfg
     pq = periodicity_cfg
-    conf_now = float(tick.conf_now)
-    raw_now = float(tick.raw_now)
-    use_cal_gate = bool(tick.use_cal_gate)
-    cal_on_active = bool(tick.cal_on_active)
-    on_support_ema = float(tick.on_support_ema)
-    cal_on_conf_thr = float(tick.cal_on_conf_thr)
-    phase_now = str(st.phase)
-    long_ready = bool(tick.long_ready)
-    long_ratio_on = float(tick.long_ratio_on)
-    short_trigger = bool(tick.short_trigger)
-    warmup_mode = bool(tick.warmup_mode)
-    warmup_on_confirmed = bool(tick.warmup_on_confirmed)
-    accel_ok = bool(tick.accel_ok)
-    delta_s_log = float(tick.delta_s_log)
-    delta_e = float(tick.delta_e)
-    warmup_cold_start_allowed = bool(not np.isfinite(st.last_off_t))
+    tick_signal = tick.signal
+    tick_quality = tick.quality
+    tick_vote = tick.vote
+
+    gate_confidence_used_now = float(tick_quality.gate_confidence_used_now)
+    gate_confidence_raw_now = float(tick_quality.gate_confidence_raw_now)
+    gate_calibration_enabled = bool(tick_quality.gate_calibration_enabled)
+    state_calibration_active = bool(tick_quality.gate_calibration_active)
+    feature_support_ema = float(tick_quality.feature_support_ema)
+    gate_calibration_confidence_threshold = float(tick_quality.gate_calibration_confidence_threshold)
+    gate_long_baseline_ready = bool(tick_quality.gate_long_baseline_ready)
+    state_cold_start_warmup_active = bool(tick_quality.state_cold_start_warmup_active)
+    gate_warmup_entry_confirmed = bool(tick_vote.gate_warmup_entry_confirmed)
+    gate_onset_acceleration_ok = bool(tick_quality.gate_onset_acceleration_ok)
+    feature_score_log_delta = float(tick_quality.feature_score_log_delta)
+    feature_evidence_delta = float(tick_quality.feature_evidence_delta)
+
+    feature_long_ratio_on = float(tick_signal.long_ratio_on)
+    feature_short_trigger = bool(tick_signal.short_trigger)
+    warmup_cold_start_allowed = bool(not np.isfinite(st.signal.last_off_t))
 
     # Confidence axis: independent from support axis.
-    on_conf_ok = bool(conf_now >= float(pq.confidence_on_min))
-    if bool(use_cal_gate) and bool(pq.confidence_dual_gate_when_cal):
+    on_conf_ok = bool(gate_confidence_used_now >= float(pq.confidence_on_min))
+    if bool(gate_calibration_enabled) and bool(pq.confidence_dual_gate_when_cal):
         on_conf_ok = bool(
             on_conf_ok
-            and np.isfinite(raw_now)
-            and (float(raw_now) >= float(pq.confidence_raw_on_min_when_cal))
+            and np.isfinite(gate_confidence_raw_now)
+            and (float(gate_confidence_raw_now) >= float(pq.confidence_raw_on_min_when_cal))
         )
     # Support axis: driven by support EMA only.
-    on_support_ok = bool(np.isfinite(on_support_ema) and (float(on_support_ema) >= float(pq.cal_on_support_enter_min)))
-    if bool(cal_on_active):
+    on_support_ok = bool(
+        np.isfinite(feature_support_ema)
+        and (float(feature_support_ema) >= float(pq.cal_on_support_enter_min))
+    )
+    if bool(state_calibration_active):
         raw_guard_ok = (
             (not bool(pq.confidence_dual_gate_when_cal))
-            or (np.isfinite(raw_now) and (float(raw_now) >= float(pq.confidence_raw_on_min_when_cal)))
+            or (
+                np.isfinite(gate_confidence_raw_now)
+                and (float(gate_confidence_raw_now) >= float(pq.confidence_raw_on_min_when_cal))
+            )
         )
         on_conf_ok = bool(
-            np.isfinite(conf_now)
-            and (float(conf_now) >= float(cal_on_conf_thr))
+            np.isfinite(gate_confidence_used_now)
+            and (float(gate_confidence_used_now) >= float(gate_calibration_confidence_threshold))
             and raw_guard_ok
         )
 
-    long_on_core = bool(bool(long_ready) and (float(long_ratio_on) >= float(lg.long_on_ratio)))
+    long_on_core = bool(
+        bool(gate_long_baseline_ready)
+        and (float(feature_long_ratio_on) >= float(lg.long_on_ratio))
+    )
     warmup_handoff_active = bool(
         bool(lg.warmup_long_enabled)
         and bool(warmup_cold_start_allowed)
-        and bool(long_ready)
-        and (int(st.long_ready_streak) <= int(lg.warmup_handoff_grace_ticks))
+        and bool(gate_long_baseline_ready)
+        and (int(st.signal.long_ready_streak) <= int(lg.warmup_handoff_grace_ticks))
     )
     off_age_sec = (
-        float(tick.t1 - float(st.last_off_t))
-        if np.isfinite(st.last_off_t)
+        float(tick_signal.t1 - float(st.signal.last_off_t))
+        if np.isfinite(st.signal.last_off_t)
         else float("nan")
     )
     re_on_active = bool(
@@ -1434,27 +1454,31 @@ def build_decision_context(
         and (float(off_age_sec) < float(th.re_on_grace_sec))
     )
     accel_evidence_ok = bool(
-        (np.isfinite(delta_s_log) and (float(delta_s_log) >= float(th.on_accel_score_log_min)))
-        or (np.isfinite(delta_e) and (float(delta_e) >= float(th.on_accel_evidence_min)))
+        (np.isfinite(feature_score_log_delta) and (float(feature_score_log_delta) >= float(th.on_accel_score_log_min)))
+        or (np.isfinite(feature_evidence_delta) and (float(feature_evidence_delta) >= float(th.on_accel_evidence_min)))
     )
-    re_on_short_ok = bool((not bool(re_on_active)) or (not bool(th.re_on_require_short_trigger)) or bool(short_trigger))
+    re_on_short_ok = bool(
+        (not bool(re_on_active))
+        or (not bool(th.re_on_require_short_trigger))
+        or bool(feature_short_trigger)
+    )
     re_on_accel_ok = bool((not bool(re_on_active)) or (not bool(th.re_on_require_accel)) or bool(accel_evidence_ok))
     post_off_rearm_active = bool(
         np.isfinite(off_age_sec)
         and (float(off_age_sec) >= 0.0)
         and (float(off_age_sec) < float(lg.post_off_rearm_sec))
     )
-    if bool(warmup_mode):
-        on_long_gate_ok = bool(warmup_on_confirmed)
+    if bool(state_cold_start_warmup_active):
+        on_long_gate_ok = bool(gate_warmup_entry_confirmed)
     elif warmup_handoff_active:
-        on_long_gate_ok = bool(long_on_core and warmup_on_confirmed)
+        on_long_gate_ok = bool(long_on_core and gate_warmup_entry_confirmed)
     elif post_off_rearm_active:
-        on_long_gate_ok = bool(long_on_core and short_trigger)
+        on_long_gate_ok = bool(long_on_core and feature_short_trigger)
     else:
         on_long_gate_ok = bool(long_on_core)
 
     on_entry_ready = bool(
-        bool(accel_ok)
+        bool(gate_onset_acceleration_ok)
         and bool(on_conf_ok)
         and bool(on_support_ok)
         and bool(on_long_gate_ok)
@@ -1462,16 +1486,16 @@ def build_decision_context(
         and bool(re_on_accel_ok)
     )
     on_entry_vote_sum = (
-        int(bool(accel_ok))
+        int(bool(gate_onset_acceleration_ok))
         + int(bool(on_conf_ok))
         + int(bool(on_support_ok))
         + int(bool(on_long_gate_ok))
     )
     return DecisionContext(
-        accel_ok=bool(accel_ok),
+        accel_ok=bool(gate_onset_acceleration_ok),
         on_conf_ok=bool(on_conf_ok),
         on_support_ok=bool(on_support_ok),
-        long_ready=bool(long_ready),
+        long_ready=bool(gate_long_baseline_ready),
         on_long_gate_ok=bool(on_long_gate_ok),
         accel_evidence_ok=bool(accel_evidence_ok),
         re_on_active=bool(re_on_active),

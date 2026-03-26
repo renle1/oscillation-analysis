@@ -80,19 +80,20 @@ def _build_burst_metrics(
 ) -> dict[str, object]:
     """Assemble burst event payload metrics from state peaks and current context."""
 
-    dominant_freq_hz = _finite_or_nan(st.freq_peak_hz)
+    st_signal = st.signal
+    dominant_freq_hz = _finite_or_nan(st_signal.freq_peak_hz)
     if not np.isfinite(dominant_freq_hz):
-        dominant_freq_hz = _finite_or_nan(st.freq_ema_hz)
+        dominant_freq_hz = _finite_or_nan(st_signal.freq_ema_hz)
     if not np.isfinite(dominant_freq_hz):
         dominant_freq_hz = _finite_or_nan(fallback_freq_hz)
     return {
         "dominant_freq_hz": float(dominant_freq_hz),
-        "burst_support_peak": _finite_or_nan(st.support_peak),
-        "burst_confidence_peak": _finite_or_nan(st.confidence_peak),
-        "burst_score_peak": _finite_or_nan(st.score_peak),
-        "burst_candidate_true_ticks": int(st.candidate_true_ticks),
-        "burst_short_trigger_hits": int(st.short_trigger_hits),
-        "burst_accel_hits": int(st.accel_hits),
+        "burst_support_peak": _finite_or_nan(st_signal.support_peak),
+        "burst_confidence_peak": _finite_or_nan(st_signal.confidence_peak),
+        "burst_score_peak": _finite_or_nan(st_signal.score_peak),
+        "burst_candidate_true_ticks": int(st_signal.candidate_true_ticks),
+        "burst_short_trigger_hits": int(st_signal.short_trigger_hits),
+        "burst_accel_hits": int(st_signal.accel_hits),
         "reason": str(reason),
         "transition_reason": str(transition_reason),
     }
@@ -101,53 +102,56 @@ def _build_burst_metrics(
 def _reset_episode_state(st: BurstChannelState, *, clear_votes: bool) -> None:
     """Reset burst episode memory while keeping long-lived channel state."""
 
-    st.candidate_start_t = None
-    st.candidate_start_update_idx = None
-    st.candidate_last_seen_t = float("nan")
-    st.active_start_t = None
-    st.active_start_update_idx = None
-    st.active_last_seen_t = float("nan")
-    st.on_event_emitted = False
-    st.freq_ema_hz = float("nan")
-    st.freq_peak_hz = float("nan")
-    st.support_peak = float("nan")
-    st.confidence_peak = float("nan")
-    st.score_peak = float("nan")
-    st.short_trigger_hits = 0
-    st.accel_hits = 0
-    st.candidate_true_ticks = 0
+    st_signal = st.signal
+    st_votes = st.votes
+    st_signal.candidate_start_t = None
+    st_signal.candidate_start_update_idx = None
+    st_signal.candidate_last_seen_t = float("nan")
+    st_signal.active_start_t = None
+    st_signal.active_start_update_idx = None
+    st_signal.active_last_seen_t = float("nan")
+    st_signal.on_event_emitted = False
+    st_signal.freq_ema_hz = float("nan")
+    st_signal.freq_peak_hz = float("nan")
+    st_signal.support_peak = float("nan")
+    st_signal.confidence_peak = float("nan")
+    st_signal.score_peak = float("nan")
+    st_signal.short_trigger_hits = 0
+    st_signal.accel_hits = 0
+    st_signal.candidate_true_ticks = 0
     if bool(clear_votes):
-        st.candidate_votes.clear()
+        st_votes.candidate_votes.clear()
 
 
 def _update_episode_peaks(st: BurstChannelState, feat: BurstTickFeatures) -> None:
     """Update burst episode maxima and frequency tracking."""
 
+    st_signal = st.signal
     f = _finite_or_nan(feat.freq_hz)
     s = _finite_or_nan(feat.support)
     c = _finite_or_nan(feat.confidence)
     score = _finite_or_nan(feat.score)
     if np.isfinite(f):
-        prev = _finite_or_nan(st.freq_ema_hz)
-        st.freq_ema_hz = float(f) if (not np.isfinite(prev)) else float((0.7 * prev) + (0.3 * f))
+        prev = _finite_or_nan(st_signal.freq_ema_hz)
+        st_signal.freq_ema_hz = float(f) if (not np.isfinite(prev)) else float((0.7 * prev) + (0.3 * f))
     if np.isfinite(s):
-        prev_peak = _finite_or_nan(st.support_peak)
+        prev_peak = _finite_or_nan(st_signal.support_peak)
         if (not np.isfinite(prev_peak)) or (float(s) >= float(prev_peak)):
-            st.support_peak = float(s)
+            st_signal.support_peak = float(s)
             if np.isfinite(f):
-                st.freq_peak_hz = float(f)
+                st_signal.freq_peak_hz = float(f)
     if np.isfinite(c):
-        prev_c = _finite_or_nan(st.confidence_peak)
-        st.confidence_peak = float(c) if (not np.isfinite(prev_c)) else float(max(prev_c, c))
+        prev_c = _finite_or_nan(st_signal.confidence_peak)
+        st_signal.confidence_peak = float(c) if (not np.isfinite(prev_c)) else float(max(prev_c, c))
     if np.isfinite(score):
-        prev_score = _finite_or_nan(st.score_peak)
-        st.score_peak = float(score) if (not np.isfinite(prev_score)) else float(max(prev_score, score))
+        prev_score = _finite_or_nan(st_signal.score_peak)
+        st_signal.score_peak = float(score) if (not np.isfinite(prev_score)) else float(max(prev_score, score))
     if bool(feat.short_trigger):
-        st.short_trigger_hits += 1
+        st_signal.short_trigger_hits += 1
     if bool(feat.accel_ok):
-        st.accel_hits += 1
+        st_signal.accel_hits += 1
     if bool(feat.candidate_core):
-        st.candidate_true_ticks += 1
+        st_signal.candidate_true_ticks += 1
 
 
 def _emit_or_stitch_burst_interval(
@@ -229,9 +233,12 @@ def build_burst_tick_features(
 ) -> BurstTickFeatures:
     """Build burst features from shared tick features."""
 
-    c_spec = _clip01(tick.c_spec)
-    c_fft = _clip01(tick.c_fft)
-    c_env = _clip01(tick.c_env)
+    tick_signal = tick.signal
+    tick_quality = tick.quality
+    st_signal = st.signal
+    c_spec = _clip01(tick_quality.c_spec)
+    c_fft = _clip01(tick_quality.c_fft)
+    c_env = _clip01(tick_quality.c_env)
     w_spec = float(max(0.0, burst_cfg.burst_conf_w_spec))
     w_fft = float(max(0.0, burst_cfg.burst_conf_w_fft))
     w_env = float(max(0.0, burst_cfg.burst_conf_w_env))
@@ -240,8 +247,8 @@ def build_burst_tick_features(
     if w_sum > 0.0:
         confidence = float(((w_spec * c_spec) + (w_fft * c_fft) + (w_env * c_env)) / w_sum)
 
-    f_welch = _finite_or_nan(tick.f_welch)
-    f_fft = _finite_or_nan(tick.f_fft)
+    f_welch = _finite_or_nan(tick_quality.f_welch)
+    f_fft = _finite_or_nan(tick_quality.f_fft)
     freq_pair_ok = True
     if np.isfinite(f_welch) and np.isfinite(f_fft):
         freq_pair_ok = bool(abs(float(f_welch) - float(f_fft)) <= float(burst_cfg.burst_freq_match_tol_hz))
@@ -258,19 +265,19 @@ def build_burst_tick_features(
         and (float(freq_hz) <= float(burst_cfg.burst_freq_high_hz))
     )
 
-    prev_freq = _finite_or_nan(st.freq_ema_hz)
+    prev_freq = _finite_or_nan(st_signal.freq_ema_hz)
     freq_consistent = True
     if np.isfinite(freq_hz) and np.isfinite(prev_freq):
         freq_consistent = bool(abs(float(freq_hz) - float(prev_freq)) <= float(burst_cfg.burst_freq_stability_tol_hz))
 
-    reason = str(tick.reason)
-    reason_ok = bool((reason == "ok") and bool(tick.score_reason_ok))
-    support = _finite_or_nan(tick.on_support_ema)
+    reason = str(tick_signal.reason)
+    reason_ok = bool((reason == "ok") and bool(tick_signal.score_reason_ok))
+    support = _finite_or_nan(tick_quality.feature_support_ema)
     if not np.isfinite(support):
-        support = _finite_or_nan(tick.on_support)
-    score = _finite_or_nan(tick.score)
-    short_trigger = bool(tick.short_trigger or tick.short_high)
-    accel_ok = bool(tick.accel_ok)
+        support = _finite_or_nan(tick_quality.feature_support_score)
+    score = _finite_or_nan(tick_signal.score)
+    short_trigger = bool(tick_signal.short_trigger or tick_signal.short_high)
+    accel_ok = bool(tick_quality.gate_onset_acceleration_ok)
 
     candidate_core = bool(
         bool(freq_pair_ok)
@@ -286,7 +293,7 @@ def build_burst_tick_features(
     )
 
     return BurstTickFeatures(
-        t1=float(tick.t1),
+        t1=float(tick_signal.t1),
         score=float(score),
         reason=reason,
         reason_ok=bool(reason_ok),
@@ -315,11 +322,12 @@ def build_burst_decision_context(
 ) -> BurstDecisionContext:
     """Build entry/hold/density decisions for one burst tick."""
 
-    st.candidate_votes.append(1 if bool(feat.candidate_core) else 0)
-    while len(st.candidate_votes) > int(burst_cfg.burst_recent_window_ticks):
-        st.candidate_votes.popleft()
-    vote_sum = int(st.candidate_votes.sum)
-    vote_n = int(len(st.candidate_votes))
+    st_votes = st.votes
+    st_votes.candidate_votes.append(1 if bool(feat.candidate_core) else 0)
+    while len(st_votes.candidate_votes) > int(burst_cfg.burst_recent_window_ticks):
+        st_votes.candidate_votes.popleft()
+    vote_sum = int(st_votes.candidate_votes.sum)
+    vote_n = int(len(st_votes.candidate_votes))
     density_ok = bool(
         (vote_n >= int(burst_cfg.burst_recent_window_ticks))
         and (vote_sum >= int(burst_cfg.burst_recent_required_ticks))
@@ -353,31 +361,32 @@ def step_burst_fsm(
 ) -> tuple[str, str]:
     """Step simple burst FSM: OFF -> CANDIDATE -> ACTIVE."""
 
-    phase_now = str(st.phase)
+    st_signal = st.signal
+    phase_now = str(st_signal.phase)
     transition_reason = str(feat.reason)
     t1 = float(feat.t1)
     if bool(decision.entry_core):
-        st.candidate_last_seen_t = float(t1)
+        st_signal.candidate_last_seen_t = float(t1)
 
     if phase_now == BURST_PHASE_OFF:
         if bool(decision.density_ok):
             _reset_episode_state(st, clear_votes=False)
-            st.candidate_start_t = float(t1)
-            st.candidate_start_update_idx = int(upd_idx)
+            st_signal.candidate_start_t = float(t1)
+            st_signal.candidate_start_update_idx = int(upd_idx)
             if bool(decision.entry_core):
-                st.candidate_last_seen_t = float(t1)
+                st_signal.candidate_last_seen_t = float(t1)
             phase_now = BURST_PHASE_CANDIDATE
             transition_reason = "burst_off_to_candidate"
             _update_episode_peaks(st, feat)
     elif phase_now == BURST_PHASE_CANDIDATE:
-        if st.candidate_start_t is None:
-            st.candidate_start_t = float(t1)
-            st.candidate_start_update_idx = int(upd_idx)
+        if st_signal.candidate_start_t is None:
+            st_signal.candidate_start_t = float(t1)
+            st_signal.candidate_start_update_idx = int(upd_idx)
         _update_episode_peaks(st, feat)
-        cand_age = float(t1 - float(st.candidate_start_t))
+        cand_age = float(t1 - float(st_signal.candidate_start_t))
         last_seen_age = (
-            float(t1 - float(st.candidate_last_seen_t))
-            if np.isfinite(_finite_or_nan(st.candidate_last_seen_t))
+            float(t1 - float(st_signal.candidate_last_seen_t))
+            if np.isfinite(_finite_or_nan(st_signal.candidate_last_seen_t))
             else float("inf")
         )
         if (not bool(decision.density_ok)) and (float(last_seen_age) > float(burst_cfg.burst_hold_gap_sec)):
@@ -387,27 +396,27 @@ def step_burst_fsm(
         elif bool(decision.density_ok) and (float(cand_age) >= float(burst_cfg.burst_confirm_min_sec)):
             phase_now = BURST_PHASE_ACTIVE
             transition_reason = "burst_candidate_to_active"
-            st.active_start_t = float(st.candidate_start_t) if st.candidate_start_t is not None else float(t1)
-            st.active_start_update_idx = (
-                int(st.candidate_start_update_idx)
-                if st.candidate_start_update_idx is not None
+            st_signal.active_start_t = float(st_signal.candidate_start_t) if st_signal.candidate_start_t is not None else float(t1)
+            st_signal.active_start_update_idx = (
+                int(st_signal.candidate_start_update_idx)
+                if st_signal.candidate_start_update_idx is not None
                 else int(upd_idx)
             )
-            st.active_last_seen_t = float(t1)
-            st.on_event_emitted = False
+            st_signal.active_last_seen_t = float(t1)
+            st_signal.on_event_emitted = False
     elif phase_now == BURST_PHASE_ACTIVE:
         _update_episode_peaks(st, feat)
         if bool(decision.hold_core):
-            st.active_last_seen_t = float(t1)
+            st_signal.active_last_seen_t = float(t1)
         hold_age = (
-            float(t1 - float(st.active_last_seen_t))
-            if np.isfinite(_finite_or_nan(st.active_last_seen_t))
+            float(t1 - float(st_signal.active_last_seen_t))
+            if np.isfinite(_finite_or_nan(st_signal.active_last_seen_t))
             else float("inf")
         )
         if float(hold_age) > float(burst_cfg.burst_hold_gap_sec):
             phase_now = BURST_PHASE_OFF
             transition_reason = "burst_active_to_off_gap"
-            st.last_off_t = float(t1)
+            st_signal.last_off_t = float(t1)
     return str(phase_now), str(transition_reason)
 
 
@@ -430,14 +439,15 @@ def emit_burst_events(
 ) -> tuple[int, int]:
     """Emit burst transition events and burst_interval_final records."""
 
-    prev_active = bool(str(st.phase) == BURST_PHASE_ACTIVE)
+    st_signal = st.signal
+    prev_active = bool(str(st_signal.phase) == BURST_PHASE_ACTIVE)
     now_active = bool(str(phase_now) == BURST_PHASE_ACTIVE)
 
     if now_active and (not prev_active):
-        if st.active_start_t is None:
-            st.active_start_t = float(t1)
-            st.active_start_update_idx = int(upd_idx)
-        if not bool(st.on_event_emitted):
+        if st_signal.active_start_t is None:
+            st_signal.active_start_t = float(t1)
+            st_signal.active_start_update_idx = int(upd_idx)
+        if not bool(st_signal.on_event_emitted):
             metrics = _build_burst_metrics(
                 st=st,
                 transition_reason="burst_on",
@@ -450,25 +460,25 @@ def emit_burst_events(
                 "device": str(key[0]),
                 "channel": str(key[1]),
                 "t_end": float(t1),
-                "start_t": float(st.active_start_t),
-                "start_update_idx": int(st.active_start_update_idx) if st.active_start_update_idx is not None else int(upd_idx),
+                "start_t": float(st_signal.active_start_t),
+                "start_update_idx": int(st_signal.active_start_update_idx) if st_signal.active_start_update_idx is not None else int(upd_idx),
                 **metrics,
             }
             events.append(ev)
             if status_cb is not None:
                 status_cb(
                     f"[BURST] ON | upd={upd_idx:03d} | dev={key[0]} | ch={key[1]} | "
-                    f"start={float(st.active_start_t):.3f} | t_end={float(t1):.3f} | "
+                    f"start={float(st_signal.active_start_t):.3f} | t_end={float(t1):.3f} | "
                     f"f={float(metrics.get('dominant_freq_hz', np.nan)):.2f}Hz"
                 )
             if on_event is not None:
                 on_event(ev)
-            st.on_event_emitted = True
+            st_signal.on_event_emitted = True
         return int(raw_burst_interval_count), int(next_burst_interval_id)
 
     if (not now_active) and prev_active:
-        start_t = float(st.active_start_t) if st.active_start_t is not None else float("nan")
-        start_idx = int(st.active_start_update_idx) if st.active_start_update_idx is not None else -1
+        start_t = float(st_signal.active_start_t) if st_signal.active_start_t is not None else float("nan")
+        start_idx = int(st_signal.active_start_update_idx) if st_signal.active_start_update_idx is not None else -1
         duration_sec = float(float(t1) - float(start_t)) if np.isfinite(start_t) else float("nan")
         raw_burst_interval_count += 1
         metrics = _build_burst_metrics(
@@ -521,7 +531,7 @@ def emit_burst_events(
                 )
         if on_event is not None:
             on_event(off_ev)
-        st.last_off_t = float(t1)
+        st_signal.last_off_t = float(t1)
         _reset_episode_state(st, clear_votes=True)
 
     return int(raw_burst_interval_count), int(next_burst_interval_id)
@@ -542,10 +552,11 @@ def emit_burst_stream_end_open_event(
 ) -> int:
     """Finalize still-open burst interval at stream end."""
 
-    if str(st.phase) != BURST_PHASE_ACTIVE:
+    st_signal = st.signal
+    if str(st_signal.phase) != BURST_PHASE_ACTIVE:
         return int(next_burst_interval_id)
-    start_t = float(st.active_start_t) if st.active_start_t is not None else float("nan")
-    start_idx = int(st.active_start_update_idx) if st.active_start_update_idx is not None else -1
+    start_t = float(st_signal.active_start_t) if st_signal.active_start_t is not None else float("nan")
+    start_idx = int(st_signal.active_start_update_idx) if st_signal.active_start_update_idx is not None else -1
     if not np.isfinite(start_t):
         return int(next_burst_interval_id)
     duration_sec = float(float(end_t) - float(start_t))
@@ -553,9 +564,9 @@ def emit_burst_stream_end_open_event(
         st=st,
         transition_reason="stream_end_open",
         reason="stream_end",
-        fallback_freq_hz=float(st.freq_ema_hz),
+        fallback_freq_hz=float(st_signal.freq_ema_hz),
     )
-    if not bool(st.on_event_emitted):
+    if not bool(st_signal.on_event_emitted):
         on_ev = {
             "event": "burst_on",
             "update_idx": int(start_idx if start_idx >= 0 else end_update_idx),
@@ -569,7 +580,7 @@ def emit_burst_stream_end_open_event(
         events.append(on_ev)
         if on_event is not None:
             on_event(on_ev)
-        st.on_event_emitted = True
+        st_signal.on_event_emitted = True
     open_ev = {
         "event": "burst_interval_open",
         "device": str(key[0]),

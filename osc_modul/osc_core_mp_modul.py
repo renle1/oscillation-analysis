@@ -54,6 +54,42 @@ def _build_mp_interval_record_base(interval_ev: dict) -> dict[str, object]:
     }
 
 
+def _merge_mp_record_sections(*sections: dict[str, object]) -> dict[str, object]:
+    """Merge semantic sections into one flat MP payload dict."""
+
+    merged: dict[str, object] = {}
+    for section in sections:
+        merged.update(section)
+    return merged
+
+
+def _apply_primary_mode_aliases(rec: dict[str, object]) -> dict[str, object]:
+    """Expose explicit primary-mode aliases while preserving legacy MP keys."""
+
+    dominant_freq_hz = float(rec.get("mp_dominant_freq_hz", np.nan))
+    dominant_signed_rate = float(
+        rec.get(
+            "mp_primary_mode_signed_rate_per_sec",
+            rec.get("mp_primary_mode_rate_per_sec", rec.get("mp_dominant_damping_per_sec", np.nan)),
+        )
+    )
+    rec["mp_primary_mode_freq_hz"] = float(dominant_freq_hz)
+    rec["mp_primary_mode_signed_rate_per_sec"] = float(dominant_signed_rate)
+    rec["mp_primary_mode_rate_per_sec"] = float(dominant_signed_rate)
+    return rec
+
+
+def _get_primary_mode_signed_rate_per_sec(src: dict[str, object]) -> float:
+    """Read preferred primary-mode signed-rate alias with legacy fallback."""
+
+    return float(
+        src.get(
+            "mp_primary_mode_signed_rate_per_sec",
+            src.get("mp_primary_mode_rate_per_sec", src.get("mp_dominant_damping_per_sec", np.nan)),
+        )
+    )
+
+
 def _select_mp_analysis_window(
     *,
     start_t: float,
@@ -643,7 +679,7 @@ def _is_mp_attempt_plausible(a: dict[str, object], prev: dict[str, object] | Non
     """Conservative plausibility check to avoid over-ordering unstable modes."""
 
     freq = float(a.get("mp_dominant_freq_hz", np.nan))
-    damping = float(a.get("mp_dominant_damping_per_sec", np.nan))
+    damping = _get_primary_mode_signed_rate_per_sec(a)
     damp_ratio = float(a.get("mp_dominant_damping_ratio", np.nan))
     amp = float(a.get("mp_dominant_amplitude", np.nan))
     if (not np.isfinite(freq)) or (freq <= 0.0):
@@ -794,7 +830,7 @@ def _run_matrix_pencil_on_window(
             continue
         fit_r2 = float(a.get("mp_fit_r2", np.nan))
         freq = float(a.get("mp_dominant_freq_hz", np.nan))
-        damping = float(a.get("mp_dominant_damping_per_sec", np.nan))
+        damping = _get_primary_mode_signed_rate_per_sec(a)
         if not np.isfinite(fit_r2):
             continue
         if (not np.isfinite(freq)) or (freq < float(mp_freq_low_hz)) or (freq > float(mp_freq_high_hz)):
@@ -864,7 +900,7 @@ def _run_matrix_pencil_on_window(
             "mode_count": int(a.get("mp_mode_count", 0)),
             "fit_r2": float(a.get("mp_fit_r2", np.nan)),
             "dominant_freq_hz": float(a.get("mp_dominant_freq_hz", np.nan)),
-            "dominant_damping_per_sec": float(a.get("mp_dominant_damping_per_sec", np.nan)),
+            "dominant_damping_per_sec": float(_get_primary_mode_signed_rate_per_sec(a)),
             "dominant_amplitude": float(a.get("mp_dominant_amplitude", np.nan)),
             "singular_ratio": float(a.get("mp_singular_ratio", np.nan)),
         }
@@ -1362,7 +1398,7 @@ class _IntervalMPPostRuntime:
         f0 = float(fit.get("mp_dominant_freq_hz", np.nan))
         if (not np.isfinite(f0)) or (float(f0) <= 0.0):
             return None
-        dps = float(fit.get("mp_dominant_damping_per_sec", np.nan))
+        dps = float(_get_primary_mode_signed_rate_per_sec(fit))
         damping_ratio = _damping_ratio_from(float(f0), float(dps))
         modes_raw = fit.get("mp_modes", [])
         attempts_raw = fit.get("mp_attempts", [])
@@ -1668,72 +1704,96 @@ class _IntervalMPPostRuntime:
                 keep_raw_summary=bool(self.modal_preprocess_keep_raw_summary),
             )
         )
+        analysis_section = {
+            "mp_status": "skipped",
+            "mp_reason": str(reason),
+        }
+        window_section = {
+            "mp_window_source": str(window_source),
+            "mp_window_start_t": float(window_start_t),
+            "mp_window_end_t": float(window_end_t),
+            "mp_window_duration_sec": (
+                float(window_end_t - window_start_t)
+                if np.isfinite(window_start_t) and np.isfinite(window_end_t)
+                else float("nan")
+            ),
+            "mp_rms_event_win_sec": float(rms_event_win_sec),
+        }
+        provenance_section = {
+            "mp_update_cadence_sec": float(self.mp_update_cadence_sec),
+            "mp_live_freq_hint_hz": float(interval_ev.get("mp_live_freq_hint_hz", np.nan)),
+        }
+        profile_section = {
+            "mp_freq_profile": "mid",
+            "mp_freq_window_sec_target": float(self.mp_freq_window_mid_sec),
+            "mp_decay_profile": "mid",
+            "mp_decay_window_sec_target": float(self.mp_decay_window_mid_sec),
+        }
+        decay_section = {
+            "mp_decay_window_source": "none",
+            "mp_decay_window_start_t": float("nan"),
+            "mp_decay_window_end_t": float("nan"),
+            "mp_decay_window_duration_sec": float("nan"),
+            "mp_decay_qualified": 0,
+            "mp_decay_qualified_reason": "not_executed",
+            "mp_decay_fit_status": "not_executed",
+            "mp_decay_fit_reason": "not_executed",
+            "mp_decay_fit_freq_hz": float("nan"),
+            "mp_decay_freq_jump_rel": float("nan"),
+            "mp_decay_rms_slope_1_per_sec": float("nan"),
+            "mp_decay_rms_r2": float("nan"),
+            "mp_decay_rms_n_windows": 0,
+            "mp_effective_decay_rate_1_per_sec": float("nan"),
+            "mp_half_life_sec": float("nan"),
+            "mp_freq_window_damping_per_sec": float("nan"),
+            "mp_freq_window_damping_ratio": float("nan"),
+        }
+        result_quality_section = {
+            "mp_n_samples": 0,
+            "mp_fit_r2": float("nan"),
+            "mp_mode_count": 0,
+            "mp_dominant_freq_hz": float("nan"),
+            "mp_dominant_damping_per_sec": float("nan"),
+            "mp_dominant_damping_ratio": float("nan"),
+            "mp_dominant_amplitude": float("nan"),
+            "mp_signal_std": float("nan"),
+        }
+        selection_section = {
+            "mp_rank_used": -1,
+            "mp_order_selection_enabled": bool(self.mp_order_selection_enabled),
+            "mp_order_candidates_used": [int(x) for x in self.mp_order_candidates],
+            "mp_attempt_count": 0,
+            "mp_best_attempt_idx": -1,
+            "mp_best_rank": -1,
+            "mp_order_stable": 0,
+            "mp_order_select_reason": "not_executed",
+            "mp_attempts": [],
+            "mp_modes": [],
+        }
+        downsample_section = {
+            "mp_downsample_enabled": bool(self.mp_downsample_enabled),
+            "mp_downsample_applied": 0,
+            "mp_downsample_reason": "disabled" if (not bool(self.mp_downsample_enabled)) else "not_applied",
+            "mp_downsample_source_fs_hz": float("nan"),
+            "mp_downsample_target_fs_hz": float(self.mp_target_fs_hz),
+            "mp_downsample_lpf_cutoff_hz": float(self.mp_downsample_lpf_cutoff_hz),
+            "mp_downsample_lpf_order": int(self.mp_downsample_lpf_order),
+            "mp_downsample_n_samples_in": 0,
+            "mp_downsample_n_samples_out": 0,
+        }
         rec.update(
-            {
-                "mp_status": "skipped",
-                "mp_reason": str(reason),
-                "mp_window_source": str(window_source),
-                "mp_window_start_t": float(window_start_t),
-                "mp_window_end_t": float(window_end_t),
-                "mp_window_duration_sec": (
-                    float(window_end_t - window_start_t)
-                    if np.isfinite(window_start_t) and np.isfinite(window_end_t)
-                    else float("nan")
-                ),
-                "mp_rms_event_win_sec": float(rms_event_win_sec),
-                "mp_update_cadence_sec": float(self.mp_update_cadence_sec),
-                "mp_live_freq_hint_hz": float(interval_ev.get("mp_live_freq_hint_hz", np.nan)),
-                "mp_freq_profile": "mid",
-                "mp_freq_window_sec_target": float(self.mp_freq_window_mid_sec),
-                "mp_decay_profile": "mid",
-                "mp_decay_window_sec_target": float(self.mp_decay_window_mid_sec),
-                "mp_decay_window_source": "none",
-                "mp_decay_window_start_t": float("nan"),
-                "mp_decay_window_end_t": float("nan"),
-                "mp_decay_window_duration_sec": float("nan"),
-                "mp_decay_qualified": 0,
-                "mp_decay_qualified_reason": "not_executed",
-                "mp_decay_fit_status": "not_executed",
-                "mp_decay_fit_reason": "not_executed",
-                "mp_decay_fit_freq_hz": float("nan"),
-                "mp_decay_freq_jump_rel": float("nan"),
-                "mp_decay_rms_slope_1_per_sec": float("nan"),
-                "mp_decay_rms_r2": float("nan"),
-                "mp_decay_rms_n_windows": 0,
-                "mp_effective_decay_rate_1_per_sec": float("nan"),
-                "mp_half_life_sec": float("nan"),
-                "mp_freq_window_damping_per_sec": float("nan"),
-                "mp_freq_window_damping_ratio": float("nan"),
-                "mp_n_samples": 0,
-                "mp_fit_r2": float("nan"),
-                "mp_mode_count": 0,
-                "mp_dominant_freq_hz": float("nan"),
-                "mp_dominant_damping_per_sec": float("nan"),
-                "mp_dominant_damping_ratio": float("nan"),
-                "mp_dominant_amplitude": float("nan"),
-                "mp_signal_std": float("nan"),
-                "mp_rank_used": -1,
-                "mp_order_selection_enabled": bool(self.mp_order_selection_enabled),
-                "mp_order_candidates_used": [int(x) for x in self.mp_order_candidates],
-                "mp_attempt_count": 0,
-                "mp_best_attempt_idx": -1,
-                "mp_best_rank": -1,
-                "mp_order_stable": 0,
-                "mp_order_select_reason": "not_executed",
-                "mp_attempts": [],
-                "mp_modes": [],
-                "mp_downsample_enabled": bool(self.mp_downsample_enabled),
-                "mp_downsample_applied": 0,
-                "mp_downsample_reason": "disabled" if (not bool(self.mp_downsample_enabled)) else "not_applied",
-                "mp_downsample_source_fs_hz": float("nan"),
-                "mp_downsample_target_fs_hz": float(self.mp_target_fs_hz),
-                "mp_downsample_lpf_cutoff_hz": float(self.mp_downsample_lpf_cutoff_hz),
-                "mp_downsample_lpf_order": int(self.mp_downsample_lpf_order),
-                "mp_downsample_n_samples_in": 0,
-                "mp_downsample_n_samples_out": 0,
-            }
+            _merge_mp_record_sections(
+                analysis_section,
+                window_section,
+                provenance_section,
+                profile_section,
+                decay_section,
+                result_quality_section,
+                selection_section,
+                downsample_section,
+            )
         )
-        return rec
+        return _apply_primary_mode_aliases(rec)
 
     def _build_live_record_from_snapshot(
         self,
@@ -1803,64 +1863,88 @@ class _IntervalMPPostRuntime:
         status = str(live_snapshot.get("status", "ok")).strip().lower() or "ok"
         reason = str(live_snapshot.get("reason", "ok"))
         freq_profile = str(live_snapshot.get("freq_profile", "mid"))
+        provenance_section = {
+            "mp_runtime_source": "live_preview_snapshot",
+        }
+        analysis_section = {
+            "mp_status": str(status),
+            "mp_reason": str(reason),
+        }
+        window_section = {
+            "mp_window_source": str(window_source),
+            "mp_window_start_t": float(window_start_t),
+            "mp_window_end_t": float(window_end_t),
+            "mp_window_duration_sec": float(window_end_t - window_start_t),
+            "mp_rms_event_win_sec": float(rms_event_win_sec),
+        }
+        profile_section = {
+            "mp_freq_profile": str(freq_profile),
+            "mp_freq_window_sec_target": float(live_snapshot.get("window_sec_target", self.mp_freq_window_mid_sec)),
+            "mp_decay_profile": str(freq_profile),
+            "mp_decay_window_sec_target": float("nan"),
+        }
+        decay_section = {
+            "mp_decay_window_source": "not_executed",
+            "mp_decay_window_start_t": float("nan"),
+            "mp_decay_window_end_t": float("nan"),
+            "mp_decay_window_duration_sec": float("nan"),
+            "mp_decay_qualified": 0,
+            "mp_decay_qualified_reason": "live_freq_window_only",
+            "mp_decay_fit_status": "not_executed",
+            "mp_decay_fit_reason": "not_executed",
+            "mp_decay_fit_freq_hz": float("nan"),
+            "mp_decay_freq_jump_rel": float("nan"),
+            "mp_decay_rms_slope_1_per_sec": float("nan"),
+            "mp_decay_rms_r2": float("nan"),
+            "mp_decay_rms_n_windows": 0,
+            "mp_effective_decay_rate_1_per_sec": float("nan"),
+            "mp_half_life_sec": float("nan"),
+            "mp_freq_window_damping_per_sec": float(damping_per_sec),
+            "mp_freq_window_damping_ratio": float(damping_ratio),
+        }
+        result_quality_section = {
+            "mp_n_samples": int(live_snapshot.get("n_samples", 0)),
+            "mp_fit_r2": float(live_snapshot.get("fit_r2", np.nan)),
+            "mp_mode_count": int(live_snapshot.get("mode_count", len(modes))),
+            "mp_dominant_freq_hz": float(freq_hz),
+            "mp_dominant_damping_per_sec": float(damping_per_sec),
+            "mp_dominant_damping_ratio": float(damping_ratio),
+            "mp_dominant_amplitude": float(live_snapshot.get("dominant_amplitude", np.nan)),
+            "mp_signal_std": float(live_snapshot.get("signal_std", np.nan)),
+        }
+        selection_section = {
+            "mp_rank_used": int(live_snapshot.get("rank_used", -1)),
+            "mp_order_selection_enabled": bool(
+                live_snapshot.get("order_selection_enabled", self.mp_order_selection_enabled)
+            ),
+            "mp_order_candidates_used": order_candidates_used,
+            "mp_attempt_count": int(live_snapshot.get("attempt_count", len(attempts))),
+            "mp_best_attempt_idx": int(live_snapshot.get("best_attempt_idx", -1)),
+            "mp_best_rank": int(live_snapshot.get("best_rank", -1)),
+            "mp_order_stable": int(live_snapshot.get("order_stable", 0)),
+            "mp_order_select_reason": str(live_snapshot.get("order_select_reason", "not_reported")),
+            "mp_attempts": attempts,
+            "mp_modes": modes,
+        }
+        downsample_section = {
+            "mp_downsample_applied": 0,
+            "mp_downsample_reason": "preview_not_applied" if bool(self.mp_downsample_enabled) else "disabled",
+            "mp_downsample_n_samples_in": int(live_snapshot.get("n_samples", 0)),
+            "mp_downsample_n_samples_out": int(live_snapshot.get("n_samples", 0)),
+        }
         rec.update(
-            {
-                "mp_runtime_source": "live_preview_snapshot",
-                "mp_status": str(status),
-                "mp_reason": str(reason),
-                "mp_window_source": str(window_source),
-                "mp_window_start_t": float(window_start_t),
-                "mp_window_end_t": float(window_end_t),
-                "mp_window_duration_sec": float(window_end_t - window_start_t),
-                "mp_rms_event_win_sec": float(rms_event_win_sec),
-                "mp_freq_profile": str(freq_profile),
-                "mp_freq_window_sec_target": float(live_snapshot.get("window_sec_target", self.mp_freq_window_mid_sec)),
-                "mp_decay_profile": str(freq_profile),
-                "mp_decay_window_sec_target": float("nan"),
-                "mp_decay_window_source": "not_executed",
-                "mp_decay_window_start_t": float("nan"),
-                "mp_decay_window_end_t": float("nan"),
-                "mp_decay_window_duration_sec": float("nan"),
-                "mp_decay_qualified": 0,
-                "mp_decay_qualified_reason": "live_freq_window_only",
-                "mp_decay_fit_status": "not_executed",
-                "mp_decay_fit_reason": "not_executed",
-                "mp_decay_fit_freq_hz": float("nan"),
-                "mp_decay_freq_jump_rel": float("nan"),
-                "mp_decay_rms_slope_1_per_sec": float("nan"),
-                "mp_decay_rms_r2": float("nan"),
-                "mp_decay_rms_n_windows": 0,
-                "mp_effective_decay_rate_1_per_sec": float("nan"),
-                "mp_half_life_sec": float("nan"),
-                "mp_freq_window_damping_per_sec": float(damping_per_sec),
-                "mp_freq_window_damping_ratio": float(damping_ratio),
-                "mp_n_samples": int(live_snapshot.get("n_samples", 0)),
-                "mp_fit_r2": float(live_snapshot.get("fit_r2", np.nan)),
-                "mp_mode_count": int(live_snapshot.get("mode_count", len(modes))),
-                "mp_dominant_freq_hz": float(freq_hz),
-                "mp_dominant_damping_per_sec": float(damping_per_sec),
-                "mp_dominant_damping_ratio": float(damping_ratio),
-                "mp_dominant_amplitude": float(live_snapshot.get("dominant_amplitude", np.nan)),
-                "mp_signal_std": float(live_snapshot.get("signal_std", np.nan)),
-                "mp_rank_used": int(live_snapshot.get("rank_used", -1)),
-                "mp_order_selection_enabled": bool(
-                    live_snapshot.get("order_selection_enabled", self.mp_order_selection_enabled)
-                ),
-                "mp_order_candidates_used": order_candidates_used,
-                "mp_attempt_count": int(live_snapshot.get("attempt_count", len(attempts))),
-                "mp_best_attempt_idx": int(live_snapshot.get("best_attempt_idx", -1)),
-                "mp_best_rank": int(live_snapshot.get("best_rank", -1)),
-                "mp_order_stable": int(live_snapshot.get("order_stable", 0)),
-                "mp_order_select_reason": str(live_snapshot.get("order_select_reason", "not_reported")),
-                "mp_attempts": attempts,
-                "mp_modes": modes,
-                "mp_downsample_applied": 0,
-                "mp_downsample_reason": "preview_not_applied" if bool(self.mp_downsample_enabled) else "disabled",
-                "mp_downsample_n_samples_in": int(live_snapshot.get("n_samples", 0)),
-                "mp_downsample_n_samples_out": int(live_snapshot.get("n_samples", 0)),
-            }
+            _merge_mp_record_sections(
+                provenance_section,
+                analysis_section,
+                window_section,
+                profile_section,
+                decay_section,
+                result_quality_section,
+                selection_section,
+                downsample_section,
+            )
         )
-        return rec
+        return _apply_primary_mode_aliases(rec)
 
     def _fit_window_full(
         self,
@@ -1929,82 +2013,103 @@ class _IntervalMPPostRuntime:
                 keep_raw_summary=bool(self.modal_preprocess_keep_raw_summary),
             )
         )
+        window_section = {
+            "mp_window_source": "none",
+            "mp_window_start_t": float("nan"),
+            "mp_window_end_t": float("nan"),
+            "mp_window_duration_sec": float("nan"),
+            "mp_rms_event_win_sec": float(rms_event_win_sec),
+        }
+        provenance_section = {
+            "mp_update_cadence_sec": float(self.mp_update_cadence_sec),
+            "mp_live_freq_hint_hz": float(interval_ev.get("mp_live_freq_hint_hz", np.nan)),
+        }
+        profile_section = {
+            "mp_freq_profile": "mid",
+            "mp_freq_window_sec_target": float(self.mp_freq_window_mid_sec),
+            "mp_decay_profile": "mid",
+            "mp_decay_window_sec_target": float(self.mp_decay_window_mid_sec),
+        }
+        decay_section = {
+            "mp_decay_window_source": "none",
+            "mp_decay_window_start_t": float("nan"),
+            "mp_decay_window_end_t": float("nan"),
+            "mp_decay_window_duration_sec": float("nan"),
+            "mp_decay_qualified": 0,
+            "mp_decay_qualified_reason": "not_executed",
+            "mp_decay_fit_status": "not_executed",
+            "mp_decay_fit_reason": "not_executed",
+            "mp_decay_fit_freq_hz": float("nan"),
+            "mp_decay_freq_jump_rel": float("nan"),
+            "mp_decay_rms_slope_1_per_sec": float("nan"),
+            "mp_decay_rms_r2": float("nan"),
+            "mp_decay_rms_n_windows": 0,
+            "mp_effective_decay_rate_1_per_sec": float("nan"),
+            "mp_half_life_sec": float("nan"),
+            "mp_freq_window_damping_per_sec": float("nan"),
+            "mp_freq_window_damping_ratio": float("nan"),
+        }
+        result_quality_section = {
+            "mp_n_samples": 0,
+            "mp_fit_r2": float("nan"),
+            "mp_mode_count": 0,
+            "mp_dominant_freq_hz": float("nan"),
+            "mp_dominant_damping_per_sec": float("nan"),
+            "mp_dominant_damping_ratio": float("nan"),
+            "mp_dominant_amplitude": float("nan"),
+            "mp_signal_std": float("nan"),
+        }
+        selection_section = {
+            "mp_rank_used": -1,
+            "mp_order_selection_enabled": bool(self.mp_order_selection_enabled),
+            "mp_order_candidates_used": [int(x) for x in self.mp_order_candidates],
+            "mp_attempt_count": 0,
+            "mp_best_attempt_idx": -1,
+            "mp_best_rank": -1,
+            "mp_order_stable": 0,
+            "mp_order_select_reason": "not_executed",
+            "mp_attempts": [],
+            "mp_modes": [],
+        }
+        downsample_section = {
+            "mp_downsample_enabled": bool(self.mp_downsample_enabled),
+            "mp_downsample_applied": 0,
+            "mp_downsample_reason": "disabled" if (not bool(self.mp_downsample_enabled)) else "not_applied",
+            "mp_downsample_source_fs_hz": float("nan"),
+            "mp_downsample_target_fs_hz": float(self.mp_target_fs_hz),
+            "mp_downsample_lpf_cutoff_hz": float(self.mp_downsample_lpf_cutoff_hz),
+            "mp_downsample_lpf_order": int(self.mp_downsample_lpf_order),
+            "mp_downsample_n_samples_in": 0,
+            "mp_downsample_n_samples_out": 0,
+        }
         rec.update(
-            {
-                "mp_window_source": "none",
-                "mp_window_start_t": float("nan"),
-                "mp_window_end_t": float("nan"),
-                "mp_window_duration_sec": float("nan"),
-                "mp_rms_event_win_sec": float(rms_event_win_sec),
-                "mp_update_cadence_sec": float(self.mp_update_cadence_sec),
-                "mp_live_freq_hint_hz": float(interval_ev.get("mp_live_freq_hint_hz", np.nan)),
-                "mp_freq_profile": "mid",
-                "mp_freq_window_sec_target": float(self.mp_freq_window_mid_sec),
-                "mp_decay_profile": "mid",
-                "mp_decay_window_sec_target": float(self.mp_decay_window_mid_sec),
-                "mp_decay_window_source": "none",
-                "mp_decay_window_start_t": float("nan"),
-                "mp_decay_window_end_t": float("nan"),
-                "mp_decay_window_duration_sec": float("nan"),
-                "mp_decay_qualified": 0,
-                "mp_decay_qualified_reason": "not_executed",
-                "mp_decay_fit_status": "not_executed",
-                "mp_decay_fit_reason": "not_executed",
-                "mp_decay_fit_freq_hz": float("nan"),
-                "mp_decay_freq_jump_rel": float("nan"),
-                "mp_decay_rms_slope_1_per_sec": float("nan"),
-                "mp_decay_rms_r2": float("nan"),
-                "mp_decay_rms_n_windows": 0,
-                "mp_effective_decay_rate_1_per_sec": float("nan"),
-                "mp_half_life_sec": float("nan"),
-                "mp_freq_window_damping_per_sec": float("nan"),
-                "mp_freq_window_damping_ratio": float("nan"),
-                "mp_n_samples": 0,
-                "mp_fit_r2": float("nan"),
-                "mp_mode_count": 0,
-                "mp_dominant_freq_hz": float("nan"),
-                "mp_dominant_damping_per_sec": float("nan"),
-                "mp_dominant_damping_ratio": float("nan"),
-                "mp_dominant_amplitude": float("nan"),
-                "mp_signal_std": float("nan"),
-                "mp_rank_used": -1,
-                "mp_order_selection_enabled": bool(self.mp_order_selection_enabled),
-                "mp_order_candidates_used": [int(x) for x in self.mp_order_candidates],
-                "mp_attempt_count": 0,
-                "mp_best_attempt_idx": -1,
-                "mp_best_rank": -1,
-                "mp_order_stable": 0,
-                "mp_order_select_reason": "not_executed",
-                "mp_attempts": [],
-                "mp_modes": [],
-                "mp_downsample_enabled": bool(self.mp_downsample_enabled),
-                "mp_downsample_applied": 0,
-                "mp_downsample_reason": "disabled" if (not bool(self.mp_downsample_enabled)) else "not_applied",
-                "mp_downsample_source_fs_hz": float("nan"),
-                "mp_downsample_target_fs_hz": float(self.mp_target_fs_hz),
-                "mp_downsample_lpf_cutoff_hz": float(self.mp_downsample_lpf_cutoff_hz),
-                "mp_downsample_lpf_order": int(self.mp_downsample_lpf_order),
-                "mp_downsample_n_samples_in": 0,
-                "mp_downsample_n_samples_out": 0,
-            }
+            _merge_mp_record_sections(
+                window_section,
+                provenance_section,
+                profile_section,
+                decay_section,
+                result_quality_section,
+                selection_section,
+                downsample_section,
+            )
         )
         start_t = float(interval_ev.get("start_t", np.nan))
         end_t = float(interval_ev.get("end_t", np.nan))
         duration_sec = float(interval_ev.get("duration_sec", np.nan))
         if (not np.isfinite(start_t)) or (not np.isfinite(end_t)) or (float(end_t) <= float(start_t)):
             rec.update({"mp_status": "skipped", "mp_reason": "invalid_interval"})
-            return rec
+            return _apply_primary_mode_aliases(rec)
         if (not np.isfinite(duration_sec)) or (float(duration_sec) < float(self.mp_min_interval_sec)):
             rec.update({"mp_status": "skipped", "mp_reason": "interval_too_short"})
-            return rec
+            return _apply_primary_mode_aliases(rec)
 
         if not samples:
             rec.update({"mp_status": "skipped", "mp_reason": "missing_interval_capture"})
-            return rec
+            return _apply_primary_mode_aliases(rec)
         arr = np.asarray(samples, dtype=float)
         if arr.ndim != 2 or arr.shape[1] != 2:
             rec.update({"mp_status": "skipped", "mp_reason": "invalid_raw_samples"})
-            return rec
+            return _apply_primary_mode_aliases(rec)
         t_src = arr[:, 0]
         v_src = arr[:, 1]
 
@@ -2071,7 +2176,7 @@ class _IntervalMPPostRuntime:
         )
         if (not np.isfinite(w0)) or (not np.isfinite(w1)) or (float(w1) <= float(w0)):
             rec.update({"mp_status": "skipped", "mp_reason": "no_valid_window", "mp_window_source": str(window_source)})
-            return rec
+            return _apply_primary_mode_aliases(rec)
 
         fit, postprep_summary, downsample_summary = self._fit_window_full(
             t_src=t_src,
@@ -2098,7 +2203,7 @@ class _IntervalMPPostRuntime:
         if ((not np.isfinite(dominant_freq_hz)) or (dominant_freq_hz <= 0.0)) and np.isfinite(provisional_freq_hz):
             dominant_freq_hz = float(provisional_freq_hz)
             rec["mp_dominant_freq_hz"] = float(dominant_freq_hz)
-        rec["mp_freq_window_damping_per_sec"] = float(rec.get("mp_dominant_damping_per_sec", np.nan))
+        rec["mp_freq_window_damping_per_sec"] = float(_get_primary_mode_signed_rate_per_sec(rec))
         rec["mp_freq_window_damping_ratio"] = _damping_ratio_from(
             float(dominant_freq_hz),
             float(rec.get("mp_freq_window_damping_per_sec", np.nan)),
@@ -2209,7 +2314,7 @@ class _IntervalMPPostRuntime:
         if "mp_dominant_damping_ratio" not in rec:
             rec["mp_dominant_damping_ratio"] = _damping_ratio_from(
                 float(rec.get("mp_dominant_freq_hz", np.nan)),
-                float(rec.get("mp_dominant_damping_per_sec", np.nan)),
+                float(_get_primary_mode_signed_rate_per_sec(rec)),
             )
         if "mp_dominant_amplitude" not in rec:
             rec["mp_dominant_amplitude"] = float("nan")
@@ -2233,7 +2338,7 @@ class _IntervalMPPostRuntime:
             rec["mp_order_select_reason"] = "not_reported"
         if "mp_attempts" not in rec:
             rec["mp_attempts"] = []
-        return rec
+        return _apply_primary_mode_aliases(rec)
 
 
 def _extract_window_slice(
