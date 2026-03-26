@@ -1075,6 +1075,7 @@ class _IntervalMPPostRuntime:
         return {
             "start_t": float(start_t),
             "samples": [],
+            "live_modal_snapshot": None,
             "live_freq_hint_hz": float("nan"),
             "last_preview_submit_t": float("nan"),
             "last_preview_submit_sample_count": 0,
@@ -1089,6 +1090,7 @@ class _IntervalMPPostRuntime:
         self._next_interval_seq_by_key[key] = int(seq)
         cap["start_t"] = float(start_t)
         cap["samples"] = []
+        cap["live_modal_snapshot"] = None
         cap["live_freq_hint_hz"] = float("nan")
         cap["last_preview_submit_t"] = float("nan")
         cap["last_preview_submit_sample_count"] = 0
@@ -1193,6 +1195,15 @@ class _IntervalMPPostRuntime:
         cap["preview_seq"] = int(preview_seq)
         cap["last_preview_submit_t"] = float(t_last)
         cap["last_preview_submit_sample_count"] = int(n_samples)
+        prev_hint_hz = float(cap.get("live_freq_hint_hz", np.nan))
+        snap_obj = cap.get("live_modal_snapshot")
+        if isinstance(snap_obj, dict):
+            try:
+                snap_hint = float(snap_obj.get("freq_hz", np.nan))
+            except Exception:
+                snap_hint = float("nan")
+            if np.isfinite(snap_hint) and (snap_hint > 0.0):
+                prev_hint_hz = float(snap_hint)
         sample_snapshot = tuple((float(t), float(v)) for t, v in samples)
         return {
             "key": (str(key[0]), str(key[1])),
@@ -1200,7 +1211,7 @@ class _IntervalMPPostRuntime:
             "preview_seq": int(preview_seq),
             "start_t": float(start_t),
             "t_end": float(t_last),
-            "prev_hint_hz": float(cap.get("live_freq_hint_hz", np.nan)),
+            "prev_hint_hz": float(prev_hint_hz),
             "samples": sample_snapshot,
         }
 
@@ -1240,20 +1251,24 @@ class _IntervalMPPostRuntime:
                 if not isinstance(job, dict):
                     continue
                 try:
-                    hint_hz = self._estimate_live_frequency_hint(
+                    snapshot = self._estimate_live_modal_snapshot(
                         start_t=float(job.get("start_t", np.nan)),
                         t_end=float(job.get("t_end", np.nan)),
                         samples=job.get("samples", ()),
                         prev_hint_hz=float(job.get("prev_hint_hz", np.nan)),
                     )
                 except Exception:
-                    hint_hz = float("nan")
-                self._apply_preview_hint(job=job, hint_hz=float(hint_hz))
+                    snapshot = None
+                self._apply_preview_snapshot(job=job, snapshot=snapshot)
             finally:
                 self._preview_queue.task_done()
 
-    def _apply_preview_hint(self, *, job: dict[str, object], hint_hz: float) -> None:
-        if (not np.isfinite(hint_hz)) or (float(hint_hz) <= 0.0):
+    def _apply_preview_snapshot(self, *, job: dict[str, object], snapshot: dict[str, object] | None) -> None:
+        if not isinstance(snapshot, dict):
+            return
+        status = str(snapshot.get("status", "")).strip().lower()
+        hint_hz = float(snapshot.get("freq_hz", np.nan))
+        if (status != "ok") or (not np.isfinite(hint_hz)) or (float(hint_hz) <= 0.0):
             return
         key = job.get("key")
         if (not isinstance(key, tuple)) or (len(key) != 2):
@@ -1276,26 +1291,27 @@ class _IntervalMPPostRuntime:
                 return
             if int(preview_seq) <= int(cap.get("last_preview_apply_seq", -1)):
                 return
+            cap["live_modal_snapshot"] = dict(snapshot)
             cap["live_freq_hint_hz"] = float(hint_hz)
             cap["last_preview_apply_seq"] = int(preview_seq)
 
-    def _estimate_live_frequency_hint(
+    def _estimate_live_modal_snapshot(
         self,
         *,
         start_t: float,
         t_end: float,
         samples: Sequence[tuple[float, float]],
         prev_hint_hz: float,
-    ) -> float:
-        """Estimate dominant frequency on active interval snapshot for adaptive windowing."""
+    ) -> dict[str, object] | None:
+        """Estimate local modal snapshot on active interval bounded preview window."""
 
         if (not np.isfinite(start_t)) or (not np.isfinite(t_end)) or (float(t_end) <= float(start_t)):
-            return float("nan")
+            return None
         if not samples:
-            return float("nan")
+            return None
         arr = np.asarray(samples, dtype=float)
         if arr.ndim != 2 or arr.shape[1] != 2:
-            return float("nan")
+            return None
         t_src = arr[:, 0]
         v_src = arr[:, 1]
         duration_sec = float(t_end - start_t)
@@ -1322,10 +1338,10 @@ class _IntervalMPPostRuntime:
             mp_fallback_default_window_sec=float(w_sec),
         )
         if (not np.isfinite(w0)) or (not np.isfinite(w1)) or (float(w1) <= float(w0)):
-            return float("nan")
+            return None
         m = np.isfinite(t_src) & np.isfinite(v_src) & (t_src >= float(w0)) & (t_src <= float(w1))
         if int(np.count_nonzero(m)) < int(self.mp_min_samples):
-            return float("nan")
+            return None
         fit = _run_matrix_pencil_on_window(
             t_src[m],
             v_src[m],
@@ -1340,10 +1356,51 @@ class _IntervalMPPostRuntime:
             mp_order_selection_enabled=bool(self.mp_order_selection_enabled),
             mp_order_candidates=self.mp_order_candidates,
         )
-        if str(fit.get("mp_status", "")) != "ok":
-            return float("nan")
+        status = str(fit.get("mp_status", "")).strip().lower()
+        if status != "ok":
+            return None
         f0 = float(fit.get("mp_dominant_freq_hz", np.nan))
-        return float(f0) if np.isfinite(f0) and (f0 > 0.0) else float("nan")
+        if (not np.isfinite(f0)) or (float(f0) <= 0.0):
+            return None
+        dps = float(fit.get("mp_dominant_damping_per_sec", np.nan))
+        damping_ratio = _damping_ratio_from(float(f0), float(dps))
+        modes_raw = fit.get("mp_modes", [])
+        attempts_raw = fit.get("mp_attempts", [])
+        cands_raw = fit.get("mp_order_candidates_used", self.mp_order_candidates)
+        modes = [dict(m) for m in modes_raw] if isinstance(modes_raw, list) else []
+        attempts = [dict(a) for a in attempts_raw] if isinstance(attempts_raw, list) else []
+        order_candidates_used = (
+            [int(x) for x in cands_raw]
+            if isinstance(cands_raw, (list, tuple))
+            else [int(x) for x in self.mp_order_candidates]
+        )
+        return {
+            "status": str(status),
+            "reason": str(fit.get("mp_reason", "ok")),
+            "freq_hz": float(f0),
+            "damping_per_sec": float(dps),
+            "damping_ratio": float(damping_ratio),
+            "fit_r2": float(fit.get("mp_fit_r2", np.nan)),
+            "mode_count": int(fit.get("mp_mode_count", len(modes))),
+            "window_source": str(_src),
+            "window_start_t": float(w0),
+            "window_end_t": float(w1),
+            "window_sec_target": float(w_sec),
+            "freq_profile": str(prof),
+            "n_samples": int(fit.get("mp_n_samples", int(np.count_nonzero(m)))),
+            "signal_std": float(fit.get("mp_signal_std", np.nan)),
+            "rank_used": int(fit.get("mp_rank_used", -1)),
+            "dominant_amplitude": float(fit.get("mp_dominant_amplitude", np.nan)),
+            "order_selection_enabled": bool(fit.get("mp_order_selection_enabled", self.mp_order_selection_enabled)),
+            "order_candidates_used": order_candidates_used,
+            "attempt_count": int(fit.get("mp_attempt_count", len(attempts))),
+            "best_attempt_idx": int(fit.get("mp_best_attempt_idx", -1)),
+            "best_rank": int(fit.get("mp_best_rank", -1)),
+            "order_stable": int(fit.get("mp_order_stable", 0)),
+            "order_select_reason": str(fit.get("mp_order_select_reason", "not_reported")),
+            "attempts": attempts,
+            "modes": modes,
+        }
 
     @staticmethod
     def _sorted_sample_pairs(samples: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -1386,6 +1443,7 @@ class _IntervalMPPostRuntime:
             seg_capture = self._active_capture_by_key.pop(key, None)
 
         live_hint = float("nan")
+        live_snapshot: dict[str, object] | None = None
         interval_seq = -1
         seg_samples: list[tuple[float, float]] = []
         if isinstance(seg_capture, dict):
@@ -1395,14 +1453,40 @@ class _IntervalMPPostRuntime:
                 seg_capture["lock"] = lock
             with lock:
                 live_hint = float(seg_capture.get("live_freq_hint_hz", np.nan))
+                snap_obj = seg_capture.get("live_modal_snapshot")
+                if isinstance(snap_obj, dict):
+                    live_snapshot = dict(snap_obj)
                 interval_seq = int(seg_capture.get("interval_seq", -1))
                 samples_obj = seg_capture.get("samples", [])
                 if isinstance(samples_obj, list):
                     seg_samples = [(float(t), float(v)) for t, v in samples_obj]
+        if isinstance(live_snapshot, dict):
+            snap_hint = float(live_snapshot.get("freq_hz", np.nan))
+            if np.isfinite(snap_hint) and (snap_hint > 0.0):
+                live_hint = float(snap_hint)
         if np.isfinite(live_hint) and (live_hint > 0.0):
             interval_copy["mp_live_freq_hint_hz"] = float(live_hint)
         if int(interval_seq) >= 0:
             self._invalidate_preview_scope(key=key, interval_seq=int(interval_seq))
+
+        if str(self.mp_runtime_mode) == MP_RUNTIME_MODE_LIVE:
+            rec = self._build_live_record_from_snapshot(
+                interval_ev=interval_copy,
+                rms_event_win_sec=float(rms_event_win_sec),
+                live_snapshot=live_snapshot,
+            )
+            with self._record_lock:
+                self._submit_seq += 1
+                seq = int(self._submit_seq)
+                self._latest_seq_by_interval_id[interval_id] = seq
+                self._latest_interval_snapshot_by_interval_id[interval_id] = (
+                    interval_copy,
+                    float(rms_event_win_sec),
+                    tuple(),
+                )
+            self._store_record(int(seq), int(interval_id), rec)
+            self._interval_capture_by_interval_id.pop(interval_id, None)
+            return
 
         merged_samples = list(self._interval_capture_by_interval_id.get(interval_id, []))
         if seg_samples:
@@ -1647,6 +1731,133 @@ class _IntervalMPPostRuntime:
                 "mp_downsample_lpf_order": int(self.mp_downsample_lpf_order),
                 "mp_downsample_n_samples_in": 0,
                 "mp_downsample_n_samples_out": 0,
+            }
+        )
+        return rec
+
+    def _build_live_record_from_snapshot(
+        self,
+        *,
+        interval_ev: dict,
+        rms_event_win_sec: float,
+        live_snapshot: dict[str, object] | None,
+    ) -> dict[str, object]:
+        """Build interval record directly from latest valid live modal snapshot."""
+
+        if not isinstance(live_snapshot, dict):
+            return self._build_skip_record(
+                interval_ev=interval_ev,
+                reason="no_live_snapshot",
+                rms_event_win_sec=float(rms_event_win_sec),
+                window_source="live_preview",
+                window_start_t=float("nan"),
+                window_end_t=float("nan"),
+            )
+
+        freq_hz = float(live_snapshot.get("freq_hz", np.nan))
+        damping_per_sec = float(live_snapshot.get("damping_per_sec", np.nan))
+        damping_ratio = float(live_snapshot.get("damping_ratio", np.nan))
+        if not np.isfinite(damping_ratio):
+            damping_ratio = _damping_ratio_from(float(freq_hz), float(damping_per_sec))
+        window_start_t = float(live_snapshot.get("window_start_t", np.nan))
+        window_end_t = float(live_snapshot.get("window_end_t", np.nan))
+        window_source = str(live_snapshot.get("window_source", "live_preview"))
+        if (not np.isfinite(window_start_t)) or (not np.isfinite(window_end_t)) or (float(window_end_t) <= float(window_start_t)):
+            return self._build_skip_record(
+                interval_ev=interval_ev,
+                reason="invalid_live_snapshot_window",
+                rms_event_win_sec=float(rms_event_win_sec),
+                window_source=str(window_source),
+                window_start_t=float(window_start_t),
+                window_end_t=float(window_end_t),
+            )
+
+        if (not np.isfinite(freq_hz)) or (float(freq_hz) <= 0.0):
+            return self._build_skip_record(
+                interval_ev=interval_ev,
+                reason="invalid_live_snapshot_freq",
+                rms_event_win_sec=float(rms_event_win_sec),
+                window_source=str(window_source),
+                window_start_t=float(window_start_t),
+                window_end_t=float(window_end_t),
+            )
+
+        rec = self._build_skip_record(
+            interval_ev=interval_ev,
+            reason="live_preview_base",
+            rms_event_win_sec=float(rms_event_win_sec),
+            window_source=str(window_source),
+            window_start_t=float(window_start_t),
+            window_end_t=float(window_end_t),
+        )
+        modes_raw = live_snapshot.get("modes", [])
+        attempts_raw = live_snapshot.get("attempts", [])
+        cands_raw = live_snapshot.get("order_candidates_used", self.mp_order_candidates)
+        modes = [dict(m) for m in modes_raw] if isinstance(modes_raw, list) else []
+        attempts = [dict(a) for a in attempts_raw] if isinstance(attempts_raw, list) else []
+        order_candidates_used = (
+            [int(x) for x in cands_raw]
+            if isinstance(cands_raw, (list, tuple))
+            else [int(x) for x in self.mp_order_candidates]
+        )
+        status = str(live_snapshot.get("status", "ok")).strip().lower() or "ok"
+        reason = str(live_snapshot.get("reason", "ok"))
+        freq_profile = str(live_snapshot.get("freq_profile", "mid"))
+        rec.update(
+            {
+                "mp_runtime_source": "live_preview_snapshot",
+                "mp_status": str(status),
+                "mp_reason": str(reason),
+                "mp_window_source": str(window_source),
+                "mp_window_start_t": float(window_start_t),
+                "mp_window_end_t": float(window_end_t),
+                "mp_window_duration_sec": float(window_end_t - window_start_t),
+                "mp_rms_event_win_sec": float(rms_event_win_sec),
+                "mp_freq_profile": str(freq_profile),
+                "mp_freq_window_sec_target": float(live_snapshot.get("window_sec_target", self.mp_freq_window_mid_sec)),
+                "mp_decay_profile": str(freq_profile),
+                "mp_decay_window_sec_target": float("nan"),
+                "mp_decay_window_source": "not_executed",
+                "mp_decay_window_start_t": float("nan"),
+                "mp_decay_window_end_t": float("nan"),
+                "mp_decay_window_duration_sec": float("nan"),
+                "mp_decay_qualified": 0,
+                "mp_decay_qualified_reason": "live_freq_window_only",
+                "mp_decay_fit_status": "not_executed",
+                "mp_decay_fit_reason": "not_executed",
+                "mp_decay_fit_freq_hz": float("nan"),
+                "mp_decay_freq_jump_rel": float("nan"),
+                "mp_decay_rms_slope_1_per_sec": float("nan"),
+                "mp_decay_rms_r2": float("nan"),
+                "mp_decay_rms_n_windows": 0,
+                "mp_effective_decay_rate_1_per_sec": float("nan"),
+                "mp_half_life_sec": float("nan"),
+                "mp_freq_window_damping_per_sec": float(damping_per_sec),
+                "mp_freq_window_damping_ratio": float(damping_ratio),
+                "mp_n_samples": int(live_snapshot.get("n_samples", 0)),
+                "mp_fit_r2": float(live_snapshot.get("fit_r2", np.nan)),
+                "mp_mode_count": int(live_snapshot.get("mode_count", len(modes))),
+                "mp_dominant_freq_hz": float(freq_hz),
+                "mp_dominant_damping_per_sec": float(damping_per_sec),
+                "mp_dominant_damping_ratio": float(damping_ratio),
+                "mp_dominant_amplitude": float(live_snapshot.get("dominant_amplitude", np.nan)),
+                "mp_signal_std": float(live_snapshot.get("signal_std", np.nan)),
+                "mp_rank_used": int(live_snapshot.get("rank_used", -1)),
+                "mp_order_selection_enabled": bool(
+                    live_snapshot.get("order_selection_enabled", self.mp_order_selection_enabled)
+                ),
+                "mp_order_candidates_used": order_candidates_used,
+                "mp_attempt_count": int(live_snapshot.get("attempt_count", len(attempts))),
+                "mp_best_attempt_idx": int(live_snapshot.get("best_attempt_idx", -1)),
+                "mp_best_rank": int(live_snapshot.get("best_rank", -1)),
+                "mp_order_stable": int(live_snapshot.get("order_stable", 0)),
+                "mp_order_select_reason": str(live_snapshot.get("order_select_reason", "not_reported")),
+                "mp_attempts": attempts,
+                "mp_modes": modes,
+                "mp_downsample_applied": 0,
+                "mp_downsample_reason": "preview_not_applied" if bool(self.mp_downsample_enabled) else "disabled",
+                "mp_downsample_n_samples_in": int(live_snapshot.get("n_samples", 0)),
+                "mp_downsample_n_samples_out": int(live_snapshot.get("n_samples", 0)),
             }
         )
         return rec
